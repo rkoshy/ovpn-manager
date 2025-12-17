@@ -1,0 +1,101 @@
+# Build directories
+builddir/
+build/
+_build/
+.builddir/
+
+# Compiled object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+ovpn-manager
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Meson
+.cache/
+meson-logs/
+meson-private/
+
+# Debian packaging
+debian/.debhelper/
+debian/ovpn-manager/
+debian/files
+debian/*.substvars
+debian/*.log
+debian/tmp/
+
+# Testing
+*.log
+test-results/
+
+# AI Coding Assistants
+.claude/              # Claude Code
+.cursor/              # Cursor
+.copilot/             # GitHub Copilot workspace data
+.cody/                # Sourcegraph Cody
+.tabnine/             # Tabnine
+.continue/            # Continue
+.aider/               # Aider
+.gpt-engineer/        # GPT Engineer
+.mentat/              # Mentat
+.openai/              # OpenAI API cache
+.anthropic/           # Anthropic API cache
+.windsurf/            # Windsurf
+.bolt/                # Bolt.new
+.v0/                  # Vercel v0
+.replit/              # Replit AI
+.supermaven/          # Supermaven
+.codeium/             # Codeium
+.blackbox/            # Blackbox AI
+ai-*.json             # Generic AI config files
+ai-*.yaml
+ai-*.yml
+
+# Core dumps
+core.*
