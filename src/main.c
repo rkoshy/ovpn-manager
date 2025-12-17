@@ -2,14 +2,19 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <glib.h>
+#include <gio/gio.h>
 #include "dbus/dbus_manager.h"
 #include "tray.h"
 #include "ui/theme.h"
 #include "ui/dashboard.h"
 
+/* Application ID for single-instance support */
+#define APP_ID "com.github.rennykoshy.ovpntool"
+
 /* Global variables */
 GMainLoop *main_loop = NULL;  /* Non-static so tray.c can access it */
 Dashboard *dashboard = NULL;  /* Non-static so tray.c can access it */
+static GApplication *app = NULL;
 static DbusManager *dbus_manager = NULL;
 static TrayIcon *tray_icon = NULL;
 static guint tray_timer_id = 0;
@@ -85,8 +90,8 @@ static void signal_handler(int signum) {
     const char *signal_name = (signum == SIGINT) ? "SIGINT" : "SIGTERM";
     printf("\nReceived %s, shutting down gracefully...\n", signal_name);
 
-    if (main_loop) {
-        g_main_loop_quit(main_loop);
+    if (app) {
+        g_application_quit(app);
     }
 }
 
@@ -170,10 +175,18 @@ static void cleanup(void) {
 }
 
 /**
- * Main entry point
+ * Application activation callback
+ * Called when app is launched or when a second instance tries to launch
  */
-int main(int argc, char *argv[]) {
-    int ret = EXIT_SUCCESS;
+static void on_app_activate(GApplication *application, gpointer user_data) {
+    (void)user_data;
+
+    /* If already initialized, just show the dashboard */
+    if (dashboard) {
+        printf("Application already running - showing dashboard\n");
+        dashboard_show(dashboard);
+        return;
+    }
 
     printf("OpenVPN3 Manager v0.1.0\n");
     printf("========================\n\n");
@@ -185,7 +198,8 @@ int main(int argc, char *argv[]) {
     printf("Initializing theme system...\n");
     if (theme_init() < 0) {
         fprintf(stderr, "Failed to initialize theme system\n");
-        return EXIT_FAILURE;
+        g_application_quit(application);
+        return;
     }
 
     /* Initialize D-Bus manager */
@@ -193,7 +207,8 @@ int main(int argc, char *argv[]) {
     dbus_manager = dbus_manager_init();
     if (!dbus_manager) {
         fprintf(stderr, "Failed to initialize D-Bus manager\n");
-        return EXIT_FAILURE;
+        g_application_quit(application);
+        return;
     }
 
     /* Check if OpenVPN3 is available (non-fatal warning) */
@@ -208,7 +223,8 @@ int main(int argc, char *argv[]) {
     dashboard = dashboard_create();
     if (!dashboard) {
         fprintf(stderr, "Failed to initialize dashboard window\n");
-        return EXIT_FAILURE;
+        g_application_quit(application);
+        return;
     }
 
     /* Initialize system tray icon */
@@ -216,7 +232,8 @@ int main(int argc, char *argv[]) {
     tray_icon = tray_icon_init("OpenVPN3 Manager");
     if (!tray_icon) {
         fprintf(stderr, "Failed to initialize system tray icon\n");
-        return EXIT_FAILURE;
+        g_application_quit(application);
+        return;
     }
 
     /* Add timer to process GTK events (50ms = 20 times per second) */
@@ -240,25 +257,46 @@ int main(int argc, char *argv[]) {
     /* Add timer to update dashboard every 2 seconds */
     dashboard_timer_id = g_timeout_add_seconds(2, dashboard_update_callback, NULL);
 
-    /* Create GLib main loop */
-    printf("Starting main event loop...\n");
-    main_loop = g_main_loop_new(NULL, FALSE);
-    if (!main_loop) {
-        fprintf(stderr, "Failed to create GLib main loop\n");
-        return EXIT_FAILURE;
-    }
-
     printf("OpenVPN3 Manager started successfully\n");
     printf("System tray icon should be visible\n");
     printf("Press Ctrl+C or use tray menu to quit\n\n");
+}
 
-    /* Run the main loop */
-    g_main_loop_run(main_loop);
+/**
+ * Application shutdown callback
+ */
+static void on_app_shutdown(GApplication *application, gpointer user_data) {
+    (void)application;
+    (void)user_data;
 
-    printf("\nMain loop exited\n");
+    printf("\nApplication shutting down\n");
 
     /* Cleanup resources */
     cleanup();
+}
 
-    return ret;
+/**
+ * Main entry point
+ */
+int main(int argc, char *argv[]) {
+    int status;
+
+    /* Create GApplication for single-instance support */
+    app = g_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
+    if (!app) {
+        fprintf(stderr, "Failed to create GApplication\n");
+        return EXIT_FAILURE;
+    }
+
+    /* Connect signals */
+    g_signal_connect(app, "activate", G_CALLBACK(on_app_activate), NULL);
+    g_signal_connect(app, "shutdown", G_CALLBACK(on_app_shutdown), NULL);
+
+    /* Run the application */
+    status = g_application_run(app, argc, argv);
+
+    /* Cleanup GApplication */
+    g_object_unref(app);
+
+    return status;
 }
