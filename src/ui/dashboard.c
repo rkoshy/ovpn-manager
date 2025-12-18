@@ -28,7 +28,7 @@ struct Dashboard {
     GtkWidget *routing_tab;
     GtkWidget *security_tab;
     /* Statistics widgets */
-    GtkWidget *stats_session_label;
+    GtkWidget *stats_session_combo;    /* Dropdown to select which session to monitor */
     GtkWidget *stats_duration_label;
     GtkWidget *stats_upload_label;
     GtkWidget *stats_download_label;
@@ -61,6 +61,7 @@ static void on_disconnect_clicked(GtkButton *button, gpointer data);
 static void on_connect_clicked(GtkButton *button, gpointer data);
 static void on_export_stats_clicked(GtkButton *button, gpointer data);
 static void on_reset_stats_clicked(GtkButton *button, gpointer data);
+static void on_session_combo_changed(GtkComboBox *combo, gpointer data);
 static void create_session_card(Dashboard *dashboard, VpnSession *session);
 static void create_config_card(Dashboard *dashboard, VpnConfig *config);
 static void create_import_config_row(Dashboard *dashboard);
@@ -578,6 +579,65 @@ static void on_reset_stats_clicked(GtkButton *button, gpointer data) {
 }
 
 /**
+ * Session combo box changed callback
+ */
+static void on_session_combo_changed(GtkComboBox *combo, gpointer data) {
+    Dashboard *dashboard = (Dashboard *)data;
+
+    if (!dashboard || !dashboard->bus) {
+        return;
+    }
+
+    gint active_index = gtk_combo_box_get_active(combo);
+    if (active_index < 0) {
+        return;
+    }
+
+    /* Build keys for data lookup */
+    char key_path[32];
+    char key_device[32];
+    snprintf(key_path, sizeof(key_path), "session-path-%d", active_index);
+    snprintf(key_device, sizeof(key_device), "device-name-%d", active_index);
+
+    /* Get the session path stored with this combo box item */
+    char *session_path = g_object_get_data(G_OBJECT(combo), key_path);
+    char *device_name = g_object_get_data(G_OBJECT(combo), key_device);
+
+    if (!session_path || !device_name) {
+        printf("No session data for index %d\n", active_index);
+        return;
+    }
+
+    printf("Dashboard: Switching to monitor session %s (device: %s)\n", session_path, device_name);
+
+    /* Recreate bandwidth monitor for the selected session */
+    if (dashboard->bandwidth_monitor) {
+        bandwidth_monitor_free(dashboard->bandwidth_monitor);
+        dashboard->bandwidth_monitor = NULL;
+    }
+
+    free(dashboard->current_device);
+    dashboard->current_device = NULL;
+
+    /* Create new monitor */
+    dashboard->bandwidth_monitor = bandwidth_monitor_create(
+        session_path,
+        device_name,
+        STATS_SOURCE_AUTO,  /* Try D-Bus first, fallback to sysfs */
+        60  /* 60-second buffer */
+    );
+    dashboard->current_device = strdup(device_name);
+
+    if (dashboard->bandwidth_monitor) {
+        printf("Dashboard: Switched to monitoring session: %s\n", session_path);
+        /* Trigger immediate update */
+        dashboard_update(dashboard, dashboard->bus);
+    } else {
+        printf("Dashboard: Failed to create bandwidth monitor for session: %s\n", session_path);
+    }
+}
+
+/**
  * Create a session card widget (Active Connection "Hero Row")
  */
 static void create_session_card(Dashboard *dashboard, VpnSession *session) {
@@ -902,10 +962,19 @@ Dashboard* dashboard_create(void) {
     /* Header row: Session selector + Duration */
     GtkWidget *stats_header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 20);
 
-    /* Session label */
-    dashboard->stats_session_label = gtk_label_new("Session: No active sessions");
-    gtk_label_set_xalign(GTK_LABEL(dashboard->stats_session_label), 0.0);
-    gtk_box_pack_start(GTK_BOX(stats_header_box), dashboard->stats_session_label, TRUE, TRUE, 0);
+    /* Session selector combo box */
+    GtkWidget *session_selector_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *session_label = gtk_label_new("Session:");
+    gtk_box_pack_start(GTK_BOX(session_selector_box), session_label, FALSE, FALSE, 0);
+
+    dashboard->stats_session_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dashboard->stats_session_combo), "No active sessions");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(dashboard->stats_session_combo), 0);
+    g_signal_connect(dashboard->stats_session_combo, "changed",
+                    G_CALLBACK(on_session_combo_changed), dashboard);
+    gtk_box_pack_start(GTK_BOX(session_selector_box), dashboard->stats_session_combo, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(stats_header_box), session_selector_box, FALSE, FALSE, 0);
 
     /* Duration label */
     dashboard->stats_duration_label = gtk_label_new("Duration: --");
@@ -1289,19 +1358,51 @@ void dashboard_update(Dashboard *dashboard, sd_bus *bus) {
     /* Add Import Config row at the end of the list */
     create_import_config_row(dashboard);
 
-    /* Update bandwidth statistics for first active session */
-    if (session_count > 0 && sessions && sessions[0]->device_name) {
-        VpnSession *active_session = sessions[0];
-
+    /* Update bandwidth statistics */
+    if (session_count > 0 && sessions) {
         /* Show statistics content, hide empty state */
         gtk_widget_show(dashboard->stats_content_box);
         gtk_widget_hide(dashboard->stats_empty_state);
 
-        /* Update session info */
-        char session_text[256];
-        snprintf(session_text, sizeof(session_text), "Session: %s",
-                active_session->config_name ? active_session->config_name : "Unknown");
-        gtk_label_set_text(GTK_LABEL(dashboard->stats_session_label), session_text);
+        /* Clear and repopulate session combo box */
+        gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(dashboard->stats_session_combo));
+
+        /* Store current selection to restore it if possible */
+        gint previous_index = gtk_combo_box_get_active(GTK_COMBO_BOX(dashboard->stats_session_combo));
+
+        /* Add all active sessions to combo box */
+        for (unsigned int i = 0; i < session_count; i++) {
+            VpnSession *session = sessions[i];
+            char item_text[256];
+            snprintf(item_text, sizeof(item_text), "%s",
+                    session->config_name ? session->config_name : "Unknown");
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dashboard->stats_session_combo), item_text);
+
+            /* Store session path and device name with this index */
+            char key_path[32];
+            char key_device[32];
+            snprintf(key_path, sizeof(key_path), "session-path-%u", i);
+            snprintf(key_device, sizeof(key_device), "device-name-%u", i);
+
+            g_object_set_data_full(G_OBJECT(dashboard->stats_session_combo), key_path,
+                                  g_strdup(session->session_path), g_free);
+            g_object_set_data_full(G_OBJECT(dashboard->stats_session_combo), key_device,
+                                  g_strdup(session->device_name ? session->device_name : ""), g_free);
+        }
+
+        /* Restore previous selection or default to first session */
+        if (previous_index >= 0 && (unsigned int)previous_index < session_count) {
+            gtk_combo_box_set_active(GTK_COMBO_BOX(dashboard->stats_session_combo), previous_index);
+        } else {
+            gtk_combo_box_set_active(GTK_COMBO_BOX(dashboard->stats_session_combo), 0);
+        }
+
+        /* Get the currently selected session */
+        gint selected_index = gtk_combo_box_get_active(GTK_COMBO_BOX(dashboard->stats_session_combo));
+        if (selected_index < 0 || (unsigned int)selected_index >= session_count) {
+            selected_index = 0;
+        }
+        VpnSession *active_session = sessions[selected_index];
 
         /* Update duration */
         time_t now = time(NULL);
@@ -1450,8 +1551,12 @@ void dashboard_update(Dashboard *dashboard, sd_bus *bus) {
         gtk_widget_hide(dashboard->stats_content_box);
         gtk_widget_show(dashboard->stats_empty_state);
 
-        /* Reset statistics */
-        gtk_label_set_text(GTK_LABEL(dashboard->stats_session_label), "Session: No active sessions");
+        /* Reset session combo box */
+        gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(dashboard->stats_session_combo));
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dashboard->stats_session_combo), "No active sessions");
+        gtk_combo_box_set_active(GTK_COMBO_BOX(dashboard->stats_session_combo), 0);
+
+        /* Reset duration label */
         gtk_label_set_text(GTK_LABEL(dashboard->stats_duration_label), "Duration: --");
 
         if (dashboard->bandwidth_monitor) {
