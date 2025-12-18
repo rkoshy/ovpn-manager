@@ -769,10 +769,10 @@ int session_get_statistics(sd_bus *bus, const char *session_path,
     if (packets_in) *packets_in = 0;
     if (packets_out) *packets_out = 0;
 
-    /* Get statistics property - it's an array of (stt) where:
-     * s = key name (e.g., "BYTES_IN", "BYTES_OUT")
-     * t = timestamp
-     * t = value
+    /* Get statistics property - it's a dictionary a{sx} where:
+     * s = key name (e.g., "BYTES_IN", "BYTES_OUT", "PACKETS_IN", "PACKETS_OUT",
+     *                     "TUN_BYTES_IN", "TUN_BYTES_OUT", "TUN_PACKETS_IN", "TUN_PACKETS_OUT")
+     * x = int64 value
      */
     r = sd_bus_get_property(
         bus,
@@ -782,7 +782,7 @@ int session_get_statistics(sd_bus *bus, const char *session_path,
         "statistics",
         &error,
         &reply,
-        "a(stt)"
+        "a{sx}"
     );
 
     if (r < 0) {
@@ -791,19 +791,19 @@ int session_get_statistics(sd_bus *bus, const char *session_path,
         return -ENOTSUP;
     }
 
-    /* Parse the array of statistics */
-    r = sd_bus_message_enter_container(reply, 'a', "(stt)");
+    /* Parse the dictionary of statistics */
+    r = sd_bus_message_enter_container(reply, 'a', "{sx}");
     if (r < 0) {
         sd_bus_message_unref(reply);
         return r;
     }
 
     /* Iterate through statistics */
-    while (sd_bus_message_enter_container(reply, 'r', "stt") > 0) {
+    while (sd_bus_message_enter_container(reply, 'e', "sx") > 0) {
         const char *key;
-        uint64_t timestamp, value;
+        int64_t value;
 
-        r = sd_bus_message_read(reply, "stt", &key, &timestamp, &value);
+        r = sd_bus_message_read(reply, "sx", &key, &value);
         if (r < 0) {
             sd_bus_message_exit_container(reply);
             sd_bus_message_exit_container(reply);
@@ -813,13 +813,13 @@ int session_get_statistics(sd_bus *bus, const char *session_path,
 
         /* Match known statistics keys */
         if (strcmp(key, "BYTES_IN") == 0 && bytes_in) {
-            *bytes_in = value;
+            *bytes_in = (uint64_t)value;
         } else if (strcmp(key, "BYTES_OUT") == 0 && bytes_out) {
-            *bytes_out = value;
+            *bytes_out = (uint64_t)value;
         } else if (strcmp(key, "PACKETS_IN") == 0 && packets_in) {
-            *packets_in = value;
+            *packets_in = (uint64_t)value;
         } else if (strcmp(key, "PACKETS_OUT") == 0 && packets_out) {
-            *packets_out = value;
+            *packets_out = (uint64_t)value;
         }
 
         sd_bus_message_exit_container(reply);
