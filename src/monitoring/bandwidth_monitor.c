@@ -1,4 +1,5 @@
 #include "bandwidth_monitor.h"
+#include "../utils/logger.h"
 #include "../dbus/session_client.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -258,18 +259,17 @@ int bandwidth_monitor_update(BandwidthMonitor *monitor, sd_bus *bus) {
         if (bus && monitor->session_path) {
             r = read_dbus_stats(bus, monitor->session_path, &sample);
             if (r >= 0) {
-                printf("BandwidthMonitor: Using D-Bus statistics (bytes_in=%lu, bytes_out=%lu)\n",
+                logger_debug("BandwidthMonitor: Using D-Bus statistics (bytes_in=%lu, bytes_out=%lu)",
                        sample.bytes_in, sample.bytes_out);
                 add_sample(monitor, &sample);
                 return 0;
             }
             /* If D-Bus fails and source is AUTO, try sysfs */
-            printf("BandwidthMonitor: D-Bus statistics failed (%d), ", r);
             if (monitor->source == STATS_SOURCE_DBUS) {
-                printf("no fallback available\n");
+                logger_debug("BandwidthMonitor: D-Bus statistics failed (%d), no fallback available", r);
                 return r;
             }
-            printf("falling back to sysfs\n");
+            logger_debug("BandwidthMonitor: D-Bus statistics failed (%d), falling back to sysfs", r);
         }
     }
 
@@ -278,7 +278,7 @@ int bandwidth_monitor_update(BandwidthMonitor *monitor, sd_bus *bus) {
         if (monitor->device_name) {
             r = read_sysfs_stats(monitor->device_name, &sample);
             if (r >= 0) {
-                printf("BandwidthMonitor: Using sysfs statistics (bytes_in=%lu, bytes_out=%lu)\n",
+                logger_debug("BandwidthMonitor: Using sysfs statistics (bytes_in=%lu, bytes_out=%lu)",
                        sample.bytes_in, sample.bytes_out);
                 add_sample(monitor, &sample);
                 return 0;

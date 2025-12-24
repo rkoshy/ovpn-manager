@@ -1,4 +1,5 @@
 #include "theme.h"
+#include "../utils/logger.h"
 #include <stdio.h>
 #include <string.h>
 #include <glib.h>
@@ -453,10 +454,10 @@ static void load_theme_css(void) {
     gtk_css_provider_load_from_data(css_provider, css_content, -1, &error);
 
     if (error) {
-        fprintf(stderr, "Failed to load CSS: %s\n", error->message);
+        logger_error("Failed to load CSS: %s", error->message);
         g_error_free(error);
     } else {
-        printf("Loaded CSS for %s mode\n",
+        logger_info("Loaded CSS for %s mode",
                current_mode == THEME_MODE_DARK ? "dark" : "light");
     }
 }
@@ -489,7 +490,7 @@ static void on_theme_changed(GObject *object, GParamSpec *pspec, gpointer user_d
     current_mode = detect_dark_theme() ? THEME_MODE_DARK : THEME_MODE_LIGHT;
 
     if (old_mode != current_mode) {
-        printf("Theme changed: %s -> %s\n",
+        logger_info("Theme changed: %s -> %s",
                old_mode == THEME_MODE_DARK ? "dark" : "light",
                current_mode == THEME_MODE_DARK ? "dark" : "light");
 
@@ -504,25 +505,25 @@ static void on_theme_changed(GObject *object, GParamSpec *pspec, gpointer user_d
 int theme_init(void) {
     /* Initialize GTK if not already done */
     if (!gtk_init_check(NULL, NULL)) {
-        fprintf(stderr, "Failed to initialize GTK for theme system\n");
+        logger_error("Failed to initialize GTK for theme system");
         return -1;
     }
 
     /* Get GTK settings */
     gtk_settings = gtk_settings_get_default();
     if (!gtk_settings) {
-        fprintf(stderr, "Failed to get GTK settings\n");
+        logger_error("Failed to get GTK settings");
         return -1;
     }
 
     /* Detect initial theme mode */
     current_mode = detect_dark_theme() ? THEME_MODE_DARK : THEME_MODE_LIGHT;
-    printf("Initial theme mode: %s\n", current_mode == THEME_MODE_DARK ? "dark" : "light");
+    logger_info("Initial theme mode: %s", current_mode == THEME_MODE_DARK ? "dark" : "light");
 
     /* Create CSS provider */
     css_provider = gtk_css_provider_new();
     if (!css_provider) {
-        fprintf(stderr, "Failed to create CSS provider\n");
+        logger_error("Failed to create CSS provider");
         return -1;
     }
 
@@ -548,7 +549,7 @@ int theme_init(void) {
     /* Initialize callbacks array */
     callbacks = g_ptr_array_new();
 
-    printf("Theme system initialized successfully\n");
+    logger_info("Theme system initialized successfully");
     return 0;
 }
 
@@ -608,7 +609,7 @@ void theme_cleanup(void) {
         css_provider = NULL;
     }
 
-    printf("Theme system cleaned up\n");
+    logger_info("Theme system cleaned up");
 }
 
 /**

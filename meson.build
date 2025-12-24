@@ -90,9 +90,23 @@ inc = include_directories('vendor')
 subdir('src')
 
 # Installation
+
+# Desktop file for application menu
+install_data(
+  'data/ovpn-manager.desktop',
+  install_dir: join_paths(get_option('datadir'), 'applications')
+)
+
+# Desktop file for autostart
 install_data(
   'data/ovpn-manager.desktop',
   install_dir: join_paths(get_option('sysconfdir'), 'xdg', 'autostart')
+)
+
+# Application icon (scalable SVG)
+install_data(
+  'data/icons/hicolor/scalable/apps/ovpn-manager.svg',
+  install_dir: join_paths(get_option('datadir'), 'icons', 'hicolor', 'scalable', 'apps')
 )
 
 # Summary

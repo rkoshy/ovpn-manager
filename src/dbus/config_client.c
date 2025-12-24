@@ -1,4 +1,5 @@
 #include "config_client.h"
+#include "../utils/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -311,7 +312,7 @@ int config_import(sd_bus *bus, const char *name, const char *config_content,
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to import config '%s': %s\n",
+        logger_error("Failed to import config '%s': %s",
                 name, error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -320,7 +321,7 @@ int config_import(sd_bus *bus, const char *name, const char *config_content,
     /* Parse object path from reply */
     r = sd_bus_message_read(reply, "o", &path);
     if (r < 0 || !path) {
-        fprintf(stderr, "Failed to read import reply: %s\n", strerror(-r));
+        logger_error("Failed to read import reply: %s", strerror(-r));
         sd_bus_message_unref(reply);
         return -EIO;
     }
@@ -328,7 +329,7 @@ int config_import(sd_bus *bus, const char *name, const char *config_content,
     *config_path = g_strdup(path);
     sd_bus_message_unref(reply);
 
-    printf("Imported config '%s' -> %s\n", name, *config_path);
+    logger_info("Imported config '%s' -> %s", name, *config_path);
 
     return 0;
 }
@@ -374,9 +375,9 @@ int config_list(sd_bus *bus, VpnConfig ***configs, unsigned int *count) {
         /* If service-related failure and not last retry, wait and retry */
         if (retry < 5 && (r == -ENODATA || r == -53)) {
             if (retry == 0) {
-                fprintf(stderr, "Configuration service not ready, waiting for startup...\n");
+                logger_error("Configuration service not ready, waiting for startup...");
             } else {
-                fprintf(stderr, "Still waiting for configuration service (attempt %d/6)...\n", retry + 1);
+                logger_error("Still waiting for configuration service (attempt %d/6)...", retry + 1);
             }
             sd_bus_error_free(&error);
             /* Give the service time to activate (1 second) */
@@ -385,7 +386,7 @@ int config_list(sd_bus *bus, VpnConfig ***configs, unsigned int *count) {
         }
 
         /* Other error or final retry failed */
-        fprintf(stderr, "Failed to fetch configs after %d attempts: %s\n",
+        logger_error("Failed to fetch configs after %d attempts: %s",
                 retry + 1, error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         g_ptr_array_free(config_array, TRUE);
@@ -395,7 +396,7 @@ int config_list(sd_bus *bus, VpnConfig ***configs, unsigned int *count) {
     /* Parse array of object paths */
     r = sd_bus_message_enter_container(reply, 'a', "o");
     if (r < 0) {
-        fprintf(stderr, "Failed to enter container: %s\n", strerror(-r));
+        logger_error("Failed to enter container: %s", strerror(-r));
         sd_bus_message_unref(reply);
         g_ptr_array_free(config_array, TRUE);
         return r;
@@ -449,13 +450,13 @@ int config_delete(sd_bus *bus, const char *config_path) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to delete config: %s\n",
+        logger_error("Failed to delete config: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
     }
 
-    printf("Deleted config: %s\n", config_path);
+    logger_info("Deleted config: %s", config_path);
 
     return 0;
 }

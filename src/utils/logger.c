@@ -6,18 +6,21 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <syslog.h>
 #include <glib.h>
 
 /* Logger state */
 static struct {
     bool initialized;
     bool log_to_file;
+    bool use_syslog;
     FILE *log_file;
     LogLevel min_level;
     GMutex mutex;  /* For thread safety */
 } logger_state = {
     .initialized = false,
     .log_to_file = false,
+    .use_syslog = false,
     .log_file = NULL,
     .min_level = LOG_LEVEL_INFO,
 };
@@ -70,7 +73,7 @@ static int ensure_log_directory(const char *log_path) {
 /**
  * Initialize the logger
  */
-int logger_init(bool log_to_file, const char *log_file_path, LogLevel min_level) {
+int logger_init(bool log_to_file, const char *log_file_path, LogLevel min_level, bool use_syslog) {
     char *default_log_path = NULL;
 
     if (logger_state.initialized) {
@@ -83,6 +86,12 @@ int logger_init(bool log_to_file, const char *log_file_path, LogLevel min_level)
 
     logger_state.min_level = min_level;
     logger_state.log_to_file = log_to_file;
+    logger_state.use_syslog = use_syslog;
+
+    /* Initialize syslog if requested */
+    if (use_syslog) {
+        openlog("ovpn-manager", LOG_PID | LOG_CONS, LOG_USER);
+    }
 
     if (log_to_file) {
         /* Determine log file path */
@@ -193,6 +202,26 @@ void logger_log(LogLevel level, const char *format, ...) {
         fflush(logger_state.log_file);
     }
 
+    /* Log to syslog for WARN and ERROR levels */
+    if (logger_state.use_syslog && level >= LOG_LEVEL_WARN) {
+        int syslog_priority;
+        switch (level) {
+            case LOG_LEVEL_WARN:
+                syslog_priority = LOG_WARNING;
+                break;
+            case LOG_LEVEL_ERROR:
+                syslog_priority = LOG_ERR;
+                break;
+            default:
+                syslog_priority = LOG_INFO;
+                break;
+        }
+
+        va_start(args, format);
+        vsyslog(syslog_priority, format, args);
+        va_end(args);
+    }
+
     g_mutex_unlock(&logger_state.mutex);
 }
 
@@ -260,14 +289,21 @@ void logger_cleanup(void) {
         return;
     }
 
-    g_mutex_lock(&logger_state.mutex);
-
+    /* Log shutdown message BEFORE acquiring mutex to avoid deadlock */
     logger_info("Logger shutting down");
+
+    g_mutex_lock(&logger_state.mutex);
 
     /* Close log file */
     if (logger_state.log_file) {
         fclose(logger_state.log_file);
         logger_state.log_file = NULL;
+    }
+
+    /* Close syslog */
+    if (logger_state.use_syslog) {
+        closelog();
+        logger_state.use_syslog = false;
     }
 
     logger_state.initialized = false;

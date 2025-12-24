@@ -1,4 +1,5 @@
 #include "config_storage.h"
+#include "../utils/logger.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,7 +82,7 @@ static int ensure_config_directory(const char *config_path) {
 
     /* Try to create directory (recursively) */
     if (g_mkdir_with_parents(dir_path, 0700) != 0 && errno != EEXIST) {
-        fprintf(stderr, "Failed to create config directory %s: %s\n",
+        logger_error("Failed to create config directory %s: %s",
                 dir_path, strerror(errno));
         ret = -1;
     }
@@ -183,14 +184,14 @@ AppConfig* config_load(const char *config_path) {
     if (!g_file_get_contents(path, &file_content, &file_size, &error)) {
         /* File doesn't exist - create default config */
         if (error->code == G_FILE_ERROR_NOENT) {
-            fprintf(stderr, "Config file not found, creating default: %s\n", path);
+            logger_info("Config file not found, creating default: %s", path);
             config = config_create_default();
             g_free(path);
             g_error_free(error);
             return config;
         }
 
-        fprintf(stderr, "Failed to read config file %s: %s\n", path, error->message);
+        logger_error("Failed to read config file %s: %s", path, error->message);
         g_free(path);
         g_error_free(error);
         return NULL;
@@ -201,7 +202,7 @@ AppConfig* config_load(const char *config_path) {
     g_free(file_content);
 
     if (!json) {
-        fprintf(stderr, "Failed to parse config JSON: %s\n", cJSON_GetErrorPtr());
+        logger_error("Failed to parse config JSON: %s", cJSON_GetErrorPtr());
         g_free(path);
         return NULL;
     }
@@ -353,7 +354,7 @@ int config_save(const AppConfig *config, const char *config_path) {
     /* Write to file with 0600 permissions */
     file = fopen(path, "w");
     if (!file) {
-        fprintf(stderr, "Failed to open config file for writing %s: %s\n",
+        logger_error("Failed to open config file for writing %s: %s",
                 path, strerror(errno));
         free(json_string);
         g_free(path);
@@ -362,7 +363,7 @@ int config_save(const AppConfig *config, const char *config_path) {
 
     /* Write JSON */
     if (fputs(json_string, file) == EOF) {
-        fprintf(stderr, "Failed to write config file %s: %s\n",
+        logger_error("Failed to write config file %s: %s",
                 path, strerror(errno));
         ret = -1;
     }
@@ -372,7 +373,7 @@ int config_save(const AppConfig *config, const char *config_path) {
 
     /* Set permissions to 0600 */
     if (chmod(path, S_IRUSR | S_IWUSR) != 0) {
-        fprintf(stderr, "Failed to set config file permissions %s: %s\n",
+        logger_error("Failed to set config file permissions %s: %s",
                 path, strerror(errno));
         ret = -1;
     }

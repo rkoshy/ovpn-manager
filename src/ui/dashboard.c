@@ -5,6 +5,7 @@
 #include "../dbus/session_client.h"
 #include "../dbus/config_client.h"
 #include "../monitoring/bandwidth_monitor.h"
+#include "../utils/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -643,10 +644,10 @@ static void on_disconnect_clicked(GtkButton *button, gpointer data) {
         return;
     }
 
-    printf("Dashboard: Disconnecting session %s\n", session_path);
+    logger_info("Dashboard: Disconnecting session %s", session_path);
     int r = session_disconnect(dashboard->bus, session_path);
     if (r < 0) {
-        fprintf(stderr, "Failed to disconnect session\n");
+        logger_error("Failed to disconnect session");
     } else {
         /* Update dashboard after disconnect */
         dashboard_update(dashboard, dashboard->bus);
@@ -664,13 +665,13 @@ static void on_connect_clicked(GtkButton *button, gpointer data) {
         return;
     }
 
-    printf("Dashboard: Connecting to config %s\n", config_path);
+    logger_info("Dashboard: Connecting to config %s", config_path);
     char *session_path = NULL;
     int r = session_start(dashboard->bus, config_path, &session_path);
     if (r < 0) {
-        fprintf(stderr, "Failed to start VPN session\n");
+        logger_error("Failed to start VPN session");
     } else {
-        printf("Started VPN session: %s\n", session_path);
+        logger_info("Started VPN session: %s", session_path);
         g_free(session_path);
         /* Update dashboard after connect */
         dashboard_update(dashboard, dashboard->bus);
@@ -1076,7 +1077,7 @@ Dashboard* dashboard_create(void) {
     /* Add notebook to window */
     gtk_container_add(GTK_CONTAINER(dashboard->window), dashboard->notebook);
 
-    printf("Dashboard window created\n");
+    logger_info("Dashboard window created");
 
     return dashboard;
 }
@@ -1223,7 +1224,7 @@ void dashboard_update(Dashboard *dashboard, sd_bus *bus) {
 
             if (!monitor) {
                 /* Create new monitor */
-                printf("Dashboard: Creating bandwidth monitor for session %s (device: %s)\n",
+                logger_debug("Dashboard: Creating bandwidth monitor for session %s (device: %s)",
                        session->config_name ? session->config_name : "unknown",
                        session->device_name);
 
@@ -1240,9 +1241,9 @@ void dashboard_update(Dashboard *dashboard, sd_bus *bus) {
                         g_strdup(session->session_path),
                         monitor
                     );
-                    printf("Dashboard: Bandwidth monitor created successfully\n");
+                    logger_debug("Dashboard: Bandwidth monitor created successfully");
                 } else {
-                    printf("Dashboard: Failed to create bandwidth monitor\n");
+                    logger_debug("Dashboard: Failed to create bandwidth monitor");
                     continue;
                 }
             }
@@ -1352,5 +1353,5 @@ void dashboard_destroy(Dashboard *dashboard) {
     }
 
     g_free(dashboard);
-    printf("Dashboard destroyed\n");
+    logger_info("Dashboard destroyed");
 }

@@ -2,6 +2,7 @@
 #include "dbus/session_client.h"
 #include "dbus/config_client.h"
 #include "utils/file_chooser.h"
+#include "utils/logger.h"
 #include "ui/widgets.h"
 #include "ui/icons.h"
 #include "ui/dashboard.h"
@@ -78,14 +79,14 @@ TrayIcon* tray_icon_init(const char *tooltip) {
 
     /* Initialize GTK if not already initialized */
     if (!gtk_init_check(NULL, NULL)) {
-        fprintf(stderr, "Failed to initialize GTK\n");
+        logger_error("Failed to initialize GTK");
         return NULL;
     }
 
     /* Allocate tray structure */
     tray = g_malloc0(sizeof(TrayIcon));
     if (!tray) {
-        fprintf(stderr, "Failed to allocate TrayIcon\n");
+        logger_error("Failed to allocate TrayIcon");
         return NULL;
     }
 
@@ -97,7 +98,7 @@ TrayIcon* tray_icon_init(const char *tooltip) {
     );
 
     if (!tray->indicator) {
-        fprintf(stderr, "Failed to create app indicator\n");
+        logger_error("Failed to create app indicator");
         g_free(tray);
         return NULL;
     }
@@ -123,7 +124,7 @@ TrayIcon* tray_icon_init(const char *tooltip) {
     /* Set the menu */
     app_indicator_set_menu(tray->indicator, GTK_MENU(tray->menu));
 
-    printf("System tray icon initialized\n");
+    logger_info("System tray icon initialized");
 
     return tray;
 }
@@ -179,7 +180,7 @@ static void quit_callback(GtkMenuItem *item, gpointer user_data) {
     (void)item;
     (void)user_data;
 
-    printf("Quit menu item clicked\n");
+    logger_info("Quit menu item clicked");
 
     /* Quit the GApplication */
     extern GApplication *app;  /* Defined in main.c */
@@ -195,7 +196,7 @@ static void show_dashboard_callback(GtkMenuItem *item, gpointer user_data) {
     (void)item;
     (void)user_data;
 
-    printf("Show Dashboard menu item clicked\n");
+    logger_info("Show Dashboard menu item clicked");
 
     if (dashboard) {
         dashboard_show(dashboard);
@@ -269,11 +270,11 @@ static void disconnect_callback(GtkMenuItem *item, gpointer user_data) {
         return;
     }
 
-    printf("Disconnecting session: %s\n", data->session_path);
+    logger_info("Disconnecting session: %s", data->session_path);
 
     int r = session_disconnect(data->bus, data->session_path);
     if (r < 0) {
-        fprintf(stderr, "Failed to disconnect session\n");
+        logger_error("Failed to disconnect session");
     } else {
         /* Remove timing entry on successful disconnect */
         remove_session_timing(data->session_path);
@@ -291,11 +292,11 @@ static void pause_callback(GtkMenuItem *item, gpointer user_data) {
         return;
     }
 
-    printf("Pausing session: %s\n", data->session_path);
+    logger_info("Pausing session: %s", data->session_path);
 
     int r = session_pause(data->bus, data->session_path, "User requested");
     if (r < 0) {
-        fprintf(stderr, "Failed to pause session\n");
+        logger_error("Failed to pause session");
     }
 }
 
@@ -310,11 +311,11 @@ static void resume_callback(GtkMenuItem *item, gpointer user_data) {
         return;
     }
 
-    printf("Resuming session: %s\n", data->session_path);
+    logger_info("Resuming session: %s", data->session_path);
 
     int r = session_resume(data->bus, data->session_path);
     if (r < 0) {
-        fprintf(stderr, "Failed to resume session\n");
+        logger_error("Failed to resume session");
     }
 }
 
@@ -326,7 +327,7 @@ static void launch_auth_browser(sd_bus *bus, const char *session_path) {
         return;
     }
 
-    printf("Auto-launching browser for authentication: %s\n", session_path);
+    logger_info("Auto-launching browser for authentication: %s", session_path);
 
     char *auth_url = NULL;
     int r = session_get_auth_url(bus, session_path, &auth_url);
@@ -336,17 +337,17 @@ static void launch_auth_browser(sd_bus *bus, const char *session_path) {
         VpnSession *session = session_get_info(bus, session_path);
         if (session && session->status_message && strstr(session->status_message, "https://")) {
             auth_url = g_strdup(session->status_message);
-            printf("Got auth URL from status message: %s\n", auth_url);
+            logger_info("Got auth URL from status message: %s", auth_url);
         }
         session_free(session);
     }
 
     if (!auth_url) {
-        fprintf(stderr, "Failed to get authentication URL\n");
+        logger_error("Failed to get authentication URL");
         return;
     }
 
-    printf("Opening browser for authentication: %s\n", auth_url);
+    logger_info("Opening browser for authentication: %s", auth_url);
 
     /* Launch browser */
     char cmd[2048];
@@ -380,7 +381,7 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     sd_bus *bus = (sd_bus *)user_data;
 
     if (!bus) {
-        fprintf(stderr, "No D-Bus connection available\n");
+        logger_error("No D-Bus connection available");
         return;
     }
 
@@ -391,7 +392,7 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
         return;
     }
 
-    printf("Selected file: %s\n", file_path);
+    logger_info("Selected file: %s", file_path);
 
     /* Read file contents */
     char *contents = NULL;
@@ -399,7 +400,7 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     int r = file_read_contents(file_path, &contents, &error);
 
     if (r < 0) {
-        fprintf(stderr, "Failed to read file: %s\n", error ? error : "Unknown error");
+        logger_error("Failed to read file: %s", error ? error : "Unknown error");
         g_free(error);
         g_free(file_path);
         return;
@@ -420,9 +421,9 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     r = config_import(bus, config_name, contents, false, true, &config_path);
 
     if (r < 0) {
-        fprintf(stderr, "Failed to import configuration\n");
+        logger_error("Failed to import configuration");
     } else {
-        printf("Successfully imported configuration: %s\n", config_name);
+        logger_info("Successfully imported configuration: %s", config_name);
         g_free(config_path);
     }
 
@@ -444,14 +445,14 @@ static void connect_config_callback(GtkMenuItem *item, gpointer user_data) {
         return;
     }
 
-    printf("Connecting to config: %s\n", data->config_path);
+    logger_info("Connecting to config: %s", data->config_path);
 
     char *session_path = NULL;
     int r = session_start(data->bus, data->config_path, &session_path);
     if (r < 0) {
-        fprintf(stderr, "Failed to start VPN session\n");
+        logger_error("Failed to start VPN session");
     } else {
-        printf("Started VPN session: %s\n", session_path);
+        logger_info("Started VPN session: %s", session_path);
         g_free(session_path);
     }
 }
@@ -786,11 +787,11 @@ void tray_icon_update_sessions(TrayIcon *tray, sd_bus *bus) {
     unsigned int config_count = 0;
     r = config_list(bus, &configs, &config_count);
 
-    printf("DEBUG: config_list returned r=%d, count=%u\n", r, config_count);
+    logger_debug("config_list returned r=%d, count=%u", r, config_count);
 
     /* Add available configurations section */
     if (r >= 0 && config_count > 0) {
-        printf("DEBUG: Adding %u configurations to menu\n", config_count);
+        logger_debug("Adding %u configurations to menu", config_count);
         /* Add separator if there were sessions */
         if (count > 0) {
             GtkWidget *sep = gtk_separator_menu_item_new();
@@ -807,7 +808,7 @@ void tray_icon_update_sessions(TrayIcon *tray, sd_bus *bus) {
         for (unsigned int i = 0; i < config_count; i++) {
             VpnConfig *config = configs[i];
 
-            printf("DEBUG: Processing config %u: %s\n", i,
+            logger_debug("Processing config %u: %s", i,
                    config->config_name ? config->config_name : "NULL");
 
             /* Check if this config is currently in use by any session */
@@ -816,7 +817,7 @@ void tray_icon_update_sessions(TrayIcon *tray, sd_bus *bus) {
                 if (sessions[j]->config_name && config->config_name &&
                     strcmp(sessions[j]->config_name, config->config_name) == 0) {
                     in_use = true;
-                    printf("DEBUG: Config '%s' is in use by session '%s'\n",
+                    logger_debug("Config '%s' is in use by session '%s'",
                            config->config_name, sessions[j]->config_name);
                     break;
                 }
@@ -827,7 +828,7 @@ void tray_icon_update_sessions(TrayIcon *tray, sd_bus *bus) {
                 config->config_name ? config->config_name : "Unknown",
                 in_use);
 
-            printf("DEBUG: Created config menu item for '%s', in_use=%d\n",
+            logger_debug("Created config menu item for '%s', in_use=%d",
                    config->config_name ? config->config_name : "NULL", in_use);
 
             /* Create submenu for this config */
@@ -1002,7 +1003,7 @@ void tray_icon_cleanup(TrayIcon *tray) {
         auth_launched = NULL;
     }
 
-    printf("System tray icon cleaned up\n");
+    logger_info("System tray icon cleaned up");
 
     g_free(tray);
 }

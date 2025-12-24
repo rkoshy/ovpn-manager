@@ -1,4 +1,5 @@
 #include "servers_tab.h"
+#include "../utils/logger.h"
 #include "../monitoring/ping_util.h"
 #include "../dbus/session_client.h"
 #include <string.h>
@@ -416,16 +417,16 @@ static void on_connect_clicked(GtkButton *button, gpointer data) {
         gtk_tree_model_get(model, &iter, COL_SERVER_INFO, &server, -1);
 
         if (server && server->config->config_path) {
-            printf("Connecting to server: %s (%s)\n",
+            logger_info("Connecting to server: %s (%s)",
                    server->config->config_name,
                    server->config->server_address);
 
             char *session_path = NULL;
             int r = session_start(tab->bus, server->config->config_path, &session_path);
             if (r < 0) {
-                fprintf(stderr, "Failed to start VPN session\n");
+                logger_error("Failed to start VPN session");
             } else {
-                printf("Started VPN session: %s\n", session_path);
+                logger_info("Started VPN session: %s", session_path);
                 g_free(session_path);
 
                 /* Update status */
@@ -462,10 +463,10 @@ static void on_disconnect_clicked(GtkButton *button, gpointer data) {
                         server->config->config_name &&
                         strcmp(sessions[i]->config_name, server->config->config_name) == 0) {
 
-                        printf("Disconnecting session: %s\n", sessions[i]->session_path);
+                        logger_info("Disconnecting session: %s", sessions[i]->session_path);
                         r = session_disconnect(tab->bus, sessions[i]->session_path);
                         if (r < 0) {
-                            fprintf(stderr, "Failed to disconnect session\n");
+                            logger_error("Failed to disconnect session");
                         } else {
                             server->connected = FALSE;
                             update_server_row(tab, server, &iter);
@@ -551,7 +552,7 @@ void servers_tab_refresh(ServersTab *tab, sd_bus *bus) {
 
     /* First time initialization - create all servers */
     if (tab->servers->len == 0) {
-        printf("ServersTab: Initial load (found %u configs)\n", config_count);
+        logger_info("ServersTab: Initial load (found %u configs)", config_count);
 
         for (unsigned int i = 0; i < config_count; i++) {
             ServerInfo *server = g_malloc0(sizeof(ServerInfo));
@@ -574,7 +575,7 @@ void servers_tab_refresh(ServersTab *tab, sd_bus *bus) {
 
             g_ptr_array_add(tab->servers, server);
 
-            printf("ServersTab: Added server '%s' (address=%s, connected=%d)\n",
+            logger_info("ServersTab: Added server '%s' (address=%s, connected=%d)",
                    server->config->config_name ? server->config->config_name : "Unknown",
                    server->config->server_address ? server->config->server_address : "N/A",
                    server->connected);

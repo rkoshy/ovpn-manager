@@ -1,5 +1,6 @@
 #include "session_client.h"
 #include "signal_handlers.h"
+#include "../utils/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,7 +102,7 @@ static int get_status_property(sd_bus *bus, const char *path,
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to get status property: %s\n",
+        logger_error("Failed to get status property: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -264,7 +265,7 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
 
     /* Verbose logging (optional) */
     #ifdef VERBOSE_DEBUG
-    printf("DEBUG: Session %s - major=%u, minor=%u, connected=%s, msg='%s'\n",
+    logger_debug("Session %s - major=%u, minor=%u, connected=%s, msg='%s'",
            session->config_name ? session->config_name : "unknown",
            major, minor, connected ? "yes" : "no",
            session->status_message ? session->status_message : "(null)");
@@ -275,12 +276,12 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
     int auth_check = session_get_auth_url(bus, session_path, &auth_url);
     bool needs_auth = (auth_check == 0);
 
-    printf("DEBUG: Session %s\n", session->config_name ? session->config_name : "unknown");
-    printf("  Status message: '%s'\n", session->status_message ? session->status_message : "(null)");
-    printf("  Auth check result: %d (0=has auth, negative=no auth)\n", auth_check);
-    printf("  Auth URL: %s\n", auth_url ? auth_url : "(null)");
-    printf("  Connected: %s\n", connected ? "yes" : "no");
-    printf("  Status codes: major=%u, minor=%u\n", major, minor);
+    logger_debug("Session %s", session->config_name ? session->config_name : "unknown");
+    logger_debug("  Status message: '%s'", session->status_message ? session->status_message : "(null)");
+    logger_debug("  Auth check result: %d (0=has auth, negative=no auth)", auth_check);
+    logger_debug("  Auth URL: %s", auth_url ? auth_url : "(null)");
+    logger_debug("  Connected: %s", connected ? "yes" : "no");
+    logger_debug("  Status codes: major=%u, minor=%u", major, minor);
 
     if (auth_url) {
         g_free(auth_url);  /* We just needed to check if auth is required */
@@ -291,10 +292,10 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
      */
     if (needs_auth) {
         /* Session is waiting for authentication */
-        printf("  -> Setting state: AUTH_REQUIRED\n");
+        logger_debug("  -> Setting state: AUTH_REQUIRED");
         session->state = SESSION_STATE_AUTH_REQUIRED;
     } else if (connected) {
-        printf("  -> Setting state: CONNECTED\n");
+        logger_debug("  -> Setting state: CONNECTED");
         /* Session has active connection */
         session->state = SESSION_STATE_CONNECTED;
     } else if (session->status_message &&
@@ -302,42 +303,40 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
                 strstr(session->status_message, "Failed") ||
                 strstr(session->status_message, "Error"))) {
         /* Check for failure/error messages FIRST, before status codes */
-        printf("  -> Setting state: ERROR (failed/error in message)\n");
+        logger_debug("  -> Setting state: ERROR (failed/error in message)");
         session->state = SESSION_STATE_ERROR;
     } else if (major == 2) {
         /* CONNECTING status */
-        printf("  -> Setting state: CONNECTING (major=2)\n");
+        logger_debug("  -> Setting state: CONNECTING (major=2)");
         session->state = SESSION_STATE_CONNECTING;
     } else if (major == 4) {
         /* PAUSED status */
-        printf("  -> Setting state: PAUSED (major=4)\n");
+        logger_debug("  -> Setting state: PAUSED (major=4)");
         session->state = SESSION_STATE_PAUSED;
     } else if (session->status_message) {
         /* Fallback to message parsing for other states */
         if (strstr(session->status_message, "authentication required") ||
             strstr(session->status_message, "Web authentication") ||
             strstr(session->status_message, "https://")) {
-            printf("  -> Setting state: AUTH_REQUIRED (from message)\n");
+            logger_debug("  -> Setting state: AUTH_REQUIRED (from message)");
             session->state = SESSION_STATE_AUTH_REQUIRED;
         } else if (strstr(session->status_message, "Connecting")) {
-            printf("  -> Setting state: CONNECTING (from message)\n");
+            logger_debug("  -> Setting state: CONNECTING (from message)");
             session->state = SESSION_STATE_CONNECTING;
         } else if (strstr(session->status_message, "Reconnecting")) {
-            printf("  -> Setting state: RECONNECTING (from message)\n");
+            logger_debug("  -> Setting state: RECONNECTING (from message)");
             session->state = SESSION_STATE_RECONNECTING;
         } else if (strstr(session->status_message, "Paused")) {
-            printf("  -> Setting state: PAUSED (from message)\n");
+            logger_debug("  -> Setting state: PAUSED (from message)");
             session->state = SESSION_STATE_PAUSED;
         } else {
-            printf("  -> Setting state: DISCONNECTED (default from message)\n");
+            logger_debug("  -> Setting state: DISCONNECTED (default from message)");
             session->state = SESSION_STATE_DISCONNECTED;
         }
     } else {
-        printf("  -> Setting state: DISCONNECTED (no message)\n");
+        logger_debug("  -> Setting state: DISCONNECTED (no message)");
         session->state = SESSION_STATE_DISCONNECTED;
     }
-
-    printf("\n");
 
     return session;
 }
@@ -375,7 +374,7 @@ int session_list(sd_bus *bus, VpnSession ***sessions, unsigned int *count) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to fetch sessions: %s\n",
+        logger_error("Failed to fetch sessions: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         g_ptr_array_free(session_array, TRUE);
@@ -385,7 +384,7 @@ int session_list(sd_bus *bus, VpnSession ***sessions, unsigned int *count) {
     /* Parse array of object paths */
     r = sd_bus_message_enter_container(reply, 'a', "o");
     if (r < 0) {
-        fprintf(stderr, "Failed to enter container: %s\n", strerror(-r));
+        logger_error("Failed to enter container: %s", strerror(-r));
         sd_bus_message_unref(reply);
         g_ptr_array_free(session_array, TRUE);
         return r;
@@ -439,7 +438,7 @@ int session_disconnect(sd_bus *bus, const char *session_path) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to disconnect session: %s\n",
+        logger_error("Failed to disconnect session: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -472,7 +471,7 @@ int session_pause(sd_bus *bus, const char *session_path, const char *reason) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to pause session: %s\n",
+        logger_error("Failed to pause session: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -504,7 +503,7 @@ int session_resume(sd_bus *bus, const char *session_path) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to resume session: %s\n",
+        logger_error("Failed to resume session: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -521,7 +520,7 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     sd_bus_message *reply = NULL;
     int r;
 
-    printf("DEBUG: session_get_auth_url called for %s\n", session_path);
+    logger_debug("session_get_auth_url called for %s", session_path);
 
     if (!bus || !session_path || !auth_url) {
         return -EINVAL;
@@ -542,7 +541,7 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     );
 
     if (r < 0) {
-        printf("DEBUG: session_get_auth_url: UserInputQueueGetTypeGroup failed: %s\n",
+        logger_debug("session_get_auth_url: UserInputQueueGetTypeGroup failed: %s",
                error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -570,11 +569,11 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     sd_bus_message_unref(reply);
 
     if (!found_auth) {
-        printf("DEBUG: session_get_auth_url: No auth requests found in queue\n");
+        logger_debug("session_get_auth_url: No auth requests found in queue");
         return -ENOENT;
     }
 
-    printf("DEBUG: session_get_auth_url: Found auth request type=%u, group=%u\n", type, group);
+    logger_debug("session_get_auth_url: Found auth request type=%u, group=%u", type, group);
 
     /* Get the list of request IDs for this type/group */
     sd_bus_error_free(&error);
@@ -593,7 +592,7 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     );
 
     if (r < 0) {
-        printf("DEBUG: UserInputQueueCheck failed: %s\n",
+        logger_debug("UserInputQueueCheck failed: %s",
                error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -612,14 +611,14 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     /* Get the first ID */
     if ((r = sd_bus_message_read(reply, "u", &req_id)) > 0) {
         found_id = true;
-        printf("DEBUG: Found request ID: %u\n", req_id);
+        logger_debug("Found request ID: %u", req_id);
     }
 
     sd_bus_message_exit_container(reply);
     sd_bus_message_unref(reply);
 
     if (!found_id) {
-        printf("DEBUG: No request IDs found\n");
+        logger_debug("No request IDs found");
         return -ENOENT;
     }
 
@@ -640,7 +639,7 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     );
 
     if (r < 0) {
-        printf("DEBUG: UserInputQueueFetch failed: %s\n",
+        logger_debug("UserInputQueueFetch failed: %s",
                error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -656,12 +655,12 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
                             &name, &description, &hidden_input,
                             &masked_input);
 
-    printf("DEBUG: UserInputQueueFetch returned: type=%u, group=%u, id=%u, description='%s'\n",
+    logger_debug("UserInputQueueFetch returned: type=%u, group=%u, id=%u, description='%s'",
            ret_type, ret_group, ret_id, description ? description : "(null)");
 
     if (r >= 0 && description && strstr(description, "http") == description) {
         *auth_url = g_strdup(description);
-        printf("DEBUG: Got auth URL: %s\n", *auth_url);
+        logger_debug("Got auth URL: %s", *auth_url);
         sd_bus_message_unref(reply);
         return 0;
     }
@@ -699,7 +698,7 @@ int session_start(sd_bus *bus, const char *config_path, char **session_path) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to create session: %s\n",
+        logger_error("Failed to create session: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
@@ -708,7 +707,7 @@ int session_start(sd_bus *bus, const char *config_path, char **session_path) {
     /* Parse session path from reply */
     r = sd_bus_message_read(reply, "o", &path);
     if (r < 0 || !path) {
-        fprintf(stderr, "Failed to read session path: %s\n", strerror(-r));
+        logger_error("Failed to read session path: %s", strerror(-r));
         sd_bus_message_unref(reply);
         return -EIO;
     }
@@ -716,7 +715,7 @@ int session_start(sd_bus *bus, const char *config_path, char **session_path) {
     *session_path = g_strdup(path);
     sd_bus_message_unref(reply);
 
-    printf("Created session: %s\n", *session_path);
+    logger_info("Created session: %s", *session_path);
 
     /* Now connect the session */
     sd_bus_error_free(&error);
@@ -732,18 +731,18 @@ int session_start(sd_bus *bus, const char *config_path, char **session_path) {
     );
 
     if (r < 0) {
-        fprintf(stderr, "Failed to connect session: %s\n",
+        logger_error("Failed to connect session: %s",
                 error.message ? error.message : strerror(-r));
         sd_bus_error_free(&error);
         return r;
     }
 
-    printf("Connected session: %s\n", *session_path);
+    logger_info("Connected session: %s", *session_path);
 
     /* Subscribe to AttentionRequired signals for OAuth detection */
     r = signals_subscribe_attention_required(bus, *session_path);
     if (r < 0) {
-        fprintf(stderr, "Warning: Failed to subscribe to authentication signals\n");
+        logger_warn("Failed to subscribe to authentication signals");
     }
 
     return 0;

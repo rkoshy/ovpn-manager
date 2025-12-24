@@ -1,4 +1,5 @@
 #include "widgets.h"
+#include "../utils/logger.h"
 #include <string.h>
 #include <time.h>
 
@@ -72,7 +73,7 @@ const char* widget_get_state_text(SessionState state) {
 GtkWidget* widget_create_menu_item(const char *label,
                                     const char *icon_name,
                                     const char *css_class) {
-    printf("DEBUG: Creating menu item: label='%s', icon='%s', css='%s'\n",
+    logger_debug("Creating menu item: label='%s', icon='%s', css='%s'",
            label ? label : "NULL",
            icon_name ? icon_name : "NULL",
            css_class ? css_class : "NULL");
@@ -85,7 +86,7 @@ GtkWidget* widget_create_menu_item(const char *label,
         menu_item = gtk_image_menu_item_new_with_label(label);
         gtk_image_menu_item_set_image(GTK_IMAGE_MENU_ITEM(menu_item), icon);
         gtk_image_menu_item_set_always_show_image(GTK_IMAGE_MENU_ITEM(menu_item), TRUE);
-        printf("DEBUG:   -> Created ImageMenuItem with icon '%s'\n", icon_name);
+        logger_debug("  -> Created ImageMenuItem with icon '%s'", icon_name);
     } else {
         menu_item = gtk_menu_item_new_with_label(label);
     }
@@ -94,7 +95,7 @@ GtkWidget* widget_create_menu_item(const char *label,
     if (css_class) {
         GtkStyleContext *context = gtk_widget_get_style_context(menu_item);
         gtk_style_context_add_class(context, css_class);
-        printf("DEBUG:   -> Applied CSS class '%s'\n", css_class);
+        logger_debug("  -> Applied CSS class '%s'", css_class);
     }
 
     return menu_item;

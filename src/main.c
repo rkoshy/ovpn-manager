@@ -7,6 +7,7 @@
 #include "tray.h"
 #include "ui/theme.h"
 #include "ui/dashboard.h"
+#include "utils/logger.h"
 
 /* Application ID for single-instance support */
 #define APP_ID "com.github.rennykoshy.ovpntool"
@@ -89,7 +90,7 @@ static gboolean dashboard_update_callback(gpointer user_data) {
  */
 static void signal_handler(int signum) {
     const char *signal_name = (signum == SIGINT) ? "SIGINT" : "SIGTERM";
-    printf("\nReceived %s, shutting down gracefully...\n", signal_name);
+    logger_info("Received %s, shutting down gracefully...", signal_name);
 
     if (app) {
         g_application_quit(app);
@@ -107,11 +108,11 @@ static void setup_signal_handlers(void) {
     sa.sa_flags = 0;
 
     if (sigaction(SIGINT, &sa, NULL) == -1) {
-        fprintf(stderr, "Failed to setup SIGINT handler\n");
+        logger_error("Failed to setup SIGINT handler");
     }
 
     if (sigaction(SIGTERM, &sa, NULL) == -1) {
-        fprintf(stderr, "Failed to setup SIGTERM handler\n");
+        logger_error("Failed to setup SIGTERM handler");
     }
 }
 
@@ -119,7 +120,7 @@ static void setup_signal_handlers(void) {
  * Cleanup function called on exit
  */
 static void cleanup(void) {
-    printf("Cleaning up resources...\n");
+    logger_info("Cleaning up resources...");
 
     /* Remove dashboard update timer */
     if (dashboard_timer_id > 0) {
@@ -172,7 +173,10 @@ static void cleanup(void) {
         main_loop = NULL;
     }
 
-    printf("Cleanup complete\n");
+    logger_info("Cleanup complete");
+
+    /* Cleanup logger system (must be last) */
+    logger_cleanup();
 }
 
 /**
@@ -184,55 +188,59 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
 
     /* If already initialized, just show the dashboard */
     if (dashboard) {
-        printf("Application already running - showing dashboard\n");
+        logger_info("Application already running - showing dashboard");
         dashboard_show(dashboard);
         return;
     }
 
-    printf("OpenVPN3 Manager v0.1.0\n");
-    printf("========================\n\n");
-
     /* Setup signal handlers */
     setup_signal_handlers();
 
+    /* Initialize logger system (must be early) */
+    logger_init(false, NULL, LOG_LEVEL_INFO, true);
+
+    /* Print banner to terminal (keep as printf for direct user output) */
+    printf("OpenVPN3 Manager v0.1.0\n");
+    printf("========================\n\n");
+
     /* Initialize theme system */
-    printf("Initializing theme system...\n");
+    logger_info("Initializing theme system...");
     if (theme_init() < 0) {
-        fprintf(stderr, "Failed to initialize theme system\n");
+        logger_error("Failed to initialize theme system");
         g_application_quit(application);
         return;
     }
 
     /* Initialize D-Bus manager */
-    printf("Initializing D-Bus manager...\n");
+    logger_info("Initializing D-Bus manager...");
     dbus_manager = dbus_manager_init();
     if (!dbus_manager) {
-        fprintf(stderr, "Failed to initialize D-Bus manager\n");
+        logger_error("Failed to initialize D-Bus manager");
         g_application_quit(application);
         return;
     }
 
     /* Check if OpenVPN3 is available (non-fatal warning) */
-    printf("Checking for OpenVPN3 services...\n");
+    logger_info("Checking for OpenVPN3 services...");
     if (!dbus_manager_check_openvpn3(dbus_manager)) {
-        fprintf(stderr, "WARNING: OpenVPN3 services not available. Some features may not work.\n");
-        fprintf(stderr, "Install openvpn3-linux if you need VPN functionality.\n\n");
+        logger_warn("OpenVPN3 services not available. Some features may not work.");
+        logger_warn("Install openvpn3-linux if you need VPN functionality.");
     }
 
     /* Initialize dashboard window */
-    printf("Initializing dashboard window...\n");
+    logger_info("Initializing dashboard window...");
     dashboard = dashboard_create();
     if (!dashboard) {
-        fprintf(stderr, "Failed to initialize dashboard window\n");
+        logger_error("Failed to initialize dashboard window");
         g_application_quit(application);
         return;
     }
 
     /* Initialize system tray icon */
-    printf("Initializing system tray icon...\n");
+    logger_info("Initializing system tray icon...");
     tray_icon = tray_icon_init("OpenVPN3 Manager");
     if (!tray_icon) {
-        fprintf(stderr, "Failed to initialize system tray icon\n");
+        logger_error("Failed to initialize system tray icon");
         g_application_quit(application);
         return;
     }
@@ -244,7 +252,7 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
     if (dbus_manager_check_openvpn3(dbus_manager)) {
         sd_bus *bus = dbus_manager_get_bus(dbus_manager);
         if (bus) {
-            printf("Loading active VPN sessions...\n");
+            logger_info("Loading active VPN sessions...");
             tray_icon_update_sessions(tray_icon, bus);
         }
     }
@@ -262,6 +270,7 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
     g_application_hold(application);
     app_held = TRUE;
 
+    /* Print user instructions to terminal (keep as printf for direct user output) */
     printf("OpenVPN3 Manager started successfully\n");
     printf("System tray icon should be visible\n");
     printf("Press Ctrl+C or use tray menu to quit\n\n");
@@ -273,7 +282,7 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
 static void on_app_shutdown(GApplication *application, gpointer user_data) {
     (void)user_data;
 
-    printf("\nApplication shutting down\n");
+    logger_info("Application shutting down");
 
     /* Release the application hold only if it was acquired */
     if (app_held) {
@@ -294,6 +303,7 @@ int main(int argc, char *argv[]) {
     /* Create GApplication for single-instance support */
     app = g_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
     if (!app) {
+        /* Logger not initialized yet, use fprintf */
         fprintf(stderr, "Failed to create GApplication\n");
         return EXIT_FAILURE;
     }

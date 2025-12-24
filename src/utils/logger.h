@@ -23,9 +23,10 @@ typedef enum {
  * @param log_to_file If true, also log to file
  * @param log_file_path Path to log file (NULL for default: ~/.local/share/ovpn-manager/app.log)
  * @param min_level Minimum log level to output
+ * @param use_syslog If true, send WARN and ERROR messages to syslog
  * @return 0 on success, negative on error
  */
-int logger_init(bool log_to_file, const char *log_file_path, LogLevel min_level);
+int logger_init(bool log_to_file, const char *log_file_path, LogLevel min_level, bool use_syslog);
 
 /**
  * Set the minimum log level

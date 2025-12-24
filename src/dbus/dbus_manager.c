@@ -1,4 +1,5 @@
 #include "dbus_manager.h"
+#include "../utils/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -24,7 +25,7 @@ static gboolean dbus_io_callback(GIOChannel *source, GIOCondition condition, gpo
     do {
         r = sd_bus_process(manager->bus, NULL);
         if (r < 0) {
-            fprintf(stderr, "Failed to process D-Bus: %s\n", strerror(-r));
+            logger_error("Failed to process D-Bus: %s", strerror(-r));
             return FALSE;
         }
     } while (r > 0);
@@ -43,14 +44,14 @@ DbusManager* dbus_manager_init(void) {
     /* Allocate manager structure */
     manager = g_malloc0(sizeof(DbusManager));
     if (!manager) {
-        fprintf(stderr, "Failed to allocate DbusManager\n");
+        logger_error("Failed to allocate DbusManager");
         return NULL;
     }
 
     /* Connect to system bus */
     r = sd_bus_open_system(&manager->bus);
     if (r < 0) {
-        fprintf(stderr, "Failed to connect to system bus: %s\n", strerror(-r));
+        logger_error("Failed to connect to system bus: %s", strerror(-r));
         g_free(manager);
         return NULL;
     }
@@ -58,7 +59,7 @@ DbusManager* dbus_manager_init(void) {
     /* Get the file descriptor for the bus */
     fd = sd_bus_get_fd(manager->bus);
     if (fd < 0) {
-        fprintf(stderr, "Failed to get D-Bus file descriptor: %s\n", strerror(-fd));
+        logger_error("Failed to get D-Bus file descriptor: %s", strerror(-fd));
         sd_bus_unref(manager->bus);
         g_free(manager);
         return NULL;
@@ -67,7 +68,7 @@ DbusManager* dbus_manager_init(void) {
     /* Create GLib I/O channel from the D-Bus fd */
     manager->bus_channel = g_io_channel_unix_new(fd);
     if (!manager->bus_channel) {
-        fprintf(stderr, "Failed to create GLib I/O channel\n");
+        logger_error("Failed to create GLib I/O channel");
         sd_bus_unref(manager->bus);
         g_free(manager);
         return NULL;
@@ -83,7 +84,7 @@ DbusManager* dbus_manager_init(void) {
 
     manager->connected = true;
 
-    printf("D-Bus manager initialized successfully\n");
+    logger_info("D-Bus manager initialized successfully");
 
     return manager;
 }
@@ -112,7 +113,7 @@ static bool check_service_available(sd_bus *bus, const char *service_name) {
 
     if (r < 0) {
         /* Service not available */
-        fprintf(stderr, "D-Bus GetNameOwner failed for %s: %s\n",
+        logger_error("D-Bus GetNameOwner failed for %s: %s",
                 service_name, error.message ? error.message : "unknown error");
         sd_bus_error_free(&error);
         return false;
@@ -132,27 +133,27 @@ bool dbus_manager_check_openvpn3(DbusManager *manager) {
     int r;
 
     if (!manager || !manager->bus) {
-        fprintf(stderr, "Invalid DbusManager\n");
+        logger_error("Invalid DbusManager");
         return false;
     }
 
     /* Process any pending D-Bus messages first */
     r = sd_bus_process(manager->bus, NULL);
     if (r < 0) {
-        fprintf(stderr, "Failed to process D-Bus: %s\n", strerror(-r));
+        logger_error("Failed to process D-Bus: %s", strerror(-r));
     }
 
     /* Check for configuration service (optional - may be activatable) */
     if (!check_service_available(manager->bus, OPENVPN3_SERVICE_CONFIG)) {
-        printf("Note: OpenVPN3 configuration service not running (will activate on demand)\n");
+        logger_info("Note: OpenVPN3 configuration service not running (will activate on demand)");
     }
 
     /* Check for sessions service (optional - only runs when there are active sessions) */
     if (!check_service_available(manager->bus, OPENVPN3_SERVICE_SESSIONS)) {
-        printf("Note: OpenVPN3 sessions service not running (will activate on demand)\n");
+        logger_info("Note: OpenVPN3 sessions service not running (will activate on demand)");
     }
 
-    printf("✅ OpenVPN3 D-Bus services installed\n");
+    logger_info("OpenVPN3 D-Bus services installed");
     return true;
 }
 
@@ -194,7 +195,7 @@ void dbus_manager_cleanup(DbusManager *manager) {
 
     manager->connected = false;
 
-    printf("D-Bus manager cleaned up\n");
+    logger_info("D-Bus manager cleaned up");
 
     g_free(manager);
 }

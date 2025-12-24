@@ -126,11 +126,15 @@ jobs:
           # Create package directory structure
           mkdir -p debian-package/DEBIAN
           mkdir -p debian-package/usr/bin
+          mkdir -p debian-package/usr/share/applications
+          mkdir -p debian-package/usr/share/icons/hicolor/scalable/apps
           mkdir -p debian-package/etc/xdg/autostart
 
           # Copy files
           cp builddir/src/ovpn-manager debian-package/usr/bin/
+          cp data/ovpn-manager.desktop debian-package/usr/share/applications/
           cp data/ovpn-manager.desktop debian-package/etc/xdg/autostart/
+          cp data/icons/hicolor/scalable/apps/ovpn-manager.svg debian-package/usr/share/icons/hicolor/scalable/apps/
 
           # Create control file
           cat > debian-package/DEBIAN/control <<EOF
@@ -141,11 +145,39 @@ jobs:
           Architecture: amd64
           Depends: libglib2.0-0, libgtk-3-0, libsystemd0, libayatana-appindicator3-1, libcairo2, openvpn3
           Maintainer: Renny Koshy <renny@koshy.org>
-          Homepage: https://github.com/rennykoshy/ovpn-tool
+          Homepage: https://github.com/rennykoshy/ovpn-manager
           Description: Professional GTK3-based VPN client for OpenVPN3
            Lightweight, event-driven VPN manager with real-time monitoring,
            server selection, and advanced features for power users.
           EOF
+
+          # Create postinst script to update icon cache
+          cat > debian-package/DEBIAN/postinst <<'POSTINST'
+          #!/bin/sh
+          set -e
+          if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+              gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+          fi
+          if command -v update-desktop-database >/dev/null 2>&1; then
+              update-desktop-database /usr/share/applications 2>/dev/null || true
+          fi
+          POSTINST
+          chmod 755 debian-package/DEBIAN/postinst
+
+          # Create postrm script to update icon cache on removal
+          cat > debian-package/DEBIAN/postrm <<'POSTRM'
+          #!/bin/sh
+          set -e
+          if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+              if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+                  gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+              fi
+              if command -v update-desktop-database >/dev/null 2>&1; then
+                  update-desktop-database /usr/share/applications 2>/dev/null || true
+              fi
+          fi
+          POSTRM
+          chmod 755 debian-package/DEBIAN/postrm
 
           # Build package
           fakeroot dpkg-deb --build debian-package

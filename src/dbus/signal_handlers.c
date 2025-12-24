@@ -1,4 +1,5 @@
 #include "signal_handlers.h"
+#include "../utils/logger.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -21,7 +22,7 @@ int attention_required_handler(sd_bus_message *m, void *userdata, sd_bus_error *
     /* Parse AttentionRequired signal: uus (three separate args, not a struct) */
     r = sd_bus_message_read(m, "uus", &type, &group, &message);
     if (r < 0) {
-        fprintf(stderr, "Failed to parse AttentionRequired signal: %s\n", strerror(-r));
+        logger_error("Failed to parse AttentionRequired signal: %s", strerror(-r));
         return 0;
     }
 
@@ -75,11 +76,11 @@ int signals_subscribe_attention_required(sd_bus *bus, const char *session_path) 
 
     r = sd_bus_add_match(bus, &slot, match, attention_required_handler, NULL);
     if (r < 0) {
-        fprintf(stderr, "Failed to subscribe to AttentionRequired: %s\n", strerror(-r));
+        logger_error("Failed to subscribe to AttentionRequired: %s", strerror(-r));
         return r;
     }
 
-    printf("Subscribed to authentication signals for session\n");
+    logger_info("Subscribed to authentication signals for session");
 
     /* Note: We don't unref the slot because we want to keep the subscription active */
 

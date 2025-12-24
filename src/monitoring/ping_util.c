@@ -1,4 +1,5 @@
 #include "ping_util.h"
+#include "../utils/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -104,7 +105,7 @@ int ping_host(const char *hostname, int timeout_ms, int *latency_ms) {
 
     if (!success) {
         if (error) {
-            fprintf(stderr, "Ping exec error for %s: %s\n", hostname, error->message);
+            logger_error("Ping exec error for %s: %s", hostname, error->message);
             g_error_free(error);
         }
         g_free(standard_output);
@@ -278,7 +279,7 @@ int ping_host_async(const char *hostname, int timeout_ms,
 
     if (!success) {
         if (error) {
-            fprintf(stderr, "Async ping spawn error for %s: %s\n", hostname, error->message);
+            logger_error("Async ping spawn error for %s: %s", hostname, error->message);
             g_error_free(error);
         }
         free_async_ping_context(ctx);
