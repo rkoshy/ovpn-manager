@@ -276,12 +276,14 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
     int auth_check = session_get_auth_url(bus, session_path, &auth_url);
     bool needs_auth = (auth_check == 0);
 
-    logger_debug("Session %s", session->config_name ? session->config_name : "unknown");
-    logger_debug("  Status message: '%s'", session->status_message ? session->status_message : "(null)");
-    logger_debug("  Auth check result: %d (0=has auth, negative=no auth)", auth_check);
-    logger_debug("  Auth URL: %s", auth_url ? auth_url : "(null)");
-    logger_debug("  Connected: %s", connected ? "yes" : "no");
-    logger_debug("  Status codes: major=%u, minor=%u", major, minor);
+    if (logger_get_verbosity() >= 1) {
+        logger_debug("Session %s", session->config_name ? session->config_name : "unknown");
+        logger_debug("  Status message: '%s'", session->status_message ? session->status_message : "(null)");
+        logger_debug("  Auth check result: %d (0=has auth, negative=no auth)", auth_check);
+        logger_debug("  Auth URL: %s", auth_url ? auth_url : "(null)");
+        logger_debug("  Connected: %s", connected ? "yes" : "no");
+        logger_debug("  Status codes: major=%u, minor=%u", major, minor);
+    }
 
     if (auth_url) {
         g_free(auth_url);  /* We just needed to check if auth is required */
@@ -292,10 +294,14 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
      */
     if (needs_auth) {
         /* Session is waiting for authentication */
-        logger_debug("  -> Setting state: AUTH_REQUIRED");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: AUTH_REQUIRED");
+        }
         session->state = SESSION_STATE_AUTH_REQUIRED;
     } else if (connected) {
-        logger_debug("  -> Setting state: CONNECTED");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: CONNECTED");
+        }
         /* Session has active connection */
         session->state = SESSION_STATE_CONNECTED;
     } else if (session->status_message &&
@@ -303,38 +309,56 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
                 strstr(session->status_message, "Failed") ||
                 strstr(session->status_message, "Error"))) {
         /* Check for failure/error messages FIRST, before status codes */
-        logger_debug("  -> Setting state: ERROR (failed/error in message)");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: ERROR (failed/error in message)");
+        }
         session->state = SESSION_STATE_ERROR;
     } else if (major == 2) {
         /* CONNECTING status */
-        logger_debug("  -> Setting state: CONNECTING (major=2)");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: CONNECTING (major=2)");
+        }
         session->state = SESSION_STATE_CONNECTING;
     } else if (major == 4) {
         /* PAUSED status */
-        logger_debug("  -> Setting state: PAUSED (major=4)");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: PAUSED (major=4)");
+        }
         session->state = SESSION_STATE_PAUSED;
     } else if (session->status_message) {
         /* Fallback to message parsing for other states */
         if (strstr(session->status_message, "authentication required") ||
             strstr(session->status_message, "Web authentication") ||
             strstr(session->status_message, "https://")) {
-            logger_debug("  -> Setting state: AUTH_REQUIRED (from message)");
+            if (logger_get_verbosity() >= 1) {
+                logger_debug("  -> Setting state: AUTH_REQUIRED (from message)");
+            }
             session->state = SESSION_STATE_AUTH_REQUIRED;
         } else if (strstr(session->status_message, "Connecting")) {
-            logger_debug("  -> Setting state: CONNECTING (from message)");
+            if (logger_get_verbosity() >= 1) {
+                logger_debug("  -> Setting state: CONNECTING (from message)");
+            }
             session->state = SESSION_STATE_CONNECTING;
         } else if (strstr(session->status_message, "Reconnecting")) {
-            logger_debug("  -> Setting state: RECONNECTING (from message)");
+            if (logger_get_verbosity() >= 1) {
+                logger_debug("  -> Setting state: RECONNECTING (from message)");
+            }
             session->state = SESSION_STATE_RECONNECTING;
         } else if (strstr(session->status_message, "Paused")) {
-            logger_debug("  -> Setting state: PAUSED (from message)");
+            if (logger_get_verbosity() >= 1) {
+                logger_debug("  -> Setting state: PAUSED (from message)");
+            }
             session->state = SESSION_STATE_PAUSED;
         } else {
-            logger_debug("  -> Setting state: DISCONNECTED (default from message)");
+            if (logger_get_verbosity() >= 1) {
+                logger_debug("  -> Setting state: DISCONNECTED (default from message)");
+            }
             session->state = SESSION_STATE_DISCONNECTED;
         }
     } else {
-        logger_debug("  -> Setting state: DISCONNECTED (no message)");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: DISCONNECTED (no message)");
+        }
         session->state = SESSION_STATE_DISCONNECTED;
     }
 
@@ -520,7 +544,9 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     sd_bus_message *reply = NULL;
     int r;
 
-    logger_debug("session_get_auth_url called for %s", session_path);
+    if (logger_get_verbosity() >= 1) {
+        logger_debug("session_get_auth_url called for %s", session_path);
+    }
 
     if (!bus || !session_path || !auth_url) {
         return -EINVAL;
@@ -569,11 +595,15 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
     sd_bus_message_unref(reply);
 
     if (!found_auth) {
-        logger_debug("session_get_auth_url: No auth requests found in queue");
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("session_get_auth_url: No auth requests found in queue");
+        }
         return -ENOENT;
     }
 
-    logger_debug("session_get_auth_url: Found auth request type=%u, group=%u", type, group);
+    if (logger_get_verbosity() >= 1) {
+        logger_debug("session_get_auth_url: Found auth request type=%u, group=%u", type, group);
+    }
 
     /* Get the list of request IDs for this type/group */
     sd_bus_error_free(&error);

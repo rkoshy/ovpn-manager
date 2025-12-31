@@ -1,4 +1,5 @@
 #include "widgets.h"
+#include "icons.h"
 #include "../utils/logger.h"
 #include <string.h>
 #include <time.h>
@@ -30,18 +31,19 @@ const char* widget_get_state_css_class(SessionState state) {
 const char* widget_get_state_icon(SessionState state) {
     switch (state) {
         case SESSION_STATE_CONNECTED:
-            return "emblem-default";  /* Green checkmark */
+            return ICON_CONNECTED;  /* Active network connection */
         case SESSION_STATE_CONNECTING:
+            return ICON_CONNECTING;  /* Establishing connection */
         case SESSION_STATE_RECONNECTING:
-            return "emblem-synchronizing";  /* Orange sync */
+            return ICON_RECONNECTING;  /* Reconnecting */
         case SESSION_STATE_PAUSED:
-            return "media-playback-pause";  /* Pause */
+            return ICON_PAUSED;  /* Paused connection */
         case SESSION_STATE_AUTH_REQUIRED:
-            return "dialog-password";  /* Key/password */
+            return ICON_AUTH_REQUIRED;  /* Authentication needed */
         case SESSION_STATE_ERROR:
-            return "dialog-error";  /* Red X */
+            return ICON_ERROR;  /* Connection error */
         default:
-            return "network-vpn";  /* Generic VPN icon */
+            return ICON_DISCONNECTED;  /* No connection */
     }
 }
 
@@ -73,10 +75,12 @@ const char* widget_get_state_text(SessionState state) {
 GtkWidget* widget_create_menu_item(const char *label,
                                     const char *icon_name,
                                     const char *css_class) {
-    logger_debug("Creating menu item: label='%s', icon='%s', css='%s'",
-           label ? label : "NULL",
-           icon_name ? icon_name : "NULL",
-           css_class ? css_class : "NULL");
+    if (logger_get_verbosity() >= 2) {
+        logger_debug("Creating menu item: label='%s', icon='%s', css='%s'",
+               label ? label : "NULL",
+               icon_name ? icon_name : "NULL",
+               css_class ? css_class : "NULL");
+    }
 
     GtkWidget *menu_item;
 
@@ -86,7 +90,9 @@ GtkWidget* widget_create_menu_item(const char *label,
         menu_item = gtk_image_menu_item_new_with_label(label);
         gtk_image_menu_item_set_image(GTK_IMAGE_MENU_ITEM(menu_item), icon);
         gtk_image_menu_item_set_always_show_image(GTK_IMAGE_MENU_ITEM(menu_item), TRUE);
-        logger_debug("  -> Created ImageMenuItem with icon '%s'", icon_name);
+        if (logger_get_verbosity() >= 2) {
+            logger_debug("  -> Created ImageMenuItem with icon '%s'", icon_name);
+        }
     } else {
         menu_item = gtk_menu_item_new_with_label(label);
     }
@@ -95,7 +101,9 @@ GtkWidget* widget_create_menu_item(const char *label,
     if (css_class) {
         GtkStyleContext *context = gtk_widget_get_style_context(menu_item);
         gtk_style_context_add_class(context, css_class);
-        logger_debug("  -> Applied CSS class '%s'", css_class);
+        if (logger_get_verbosity() >= 2) {
+            logger_debug("  -> Applied CSS class '%s'", css_class);
+        }
     }
 
     return menu_item;
@@ -133,7 +141,7 @@ GtkWidget* widget_create_session_item(VpnSession *session, gboolean with_timer) 
  * Create a configuration menu item
  */
 GtkWidget* widget_create_config_item(const char *config_name, gboolean is_in_use) {
-    const char *icon_name = is_in_use ? "emblem-default" : "network-vpn";
+    const char *icon_name = is_in_use ? ICON_CONFIG_IN_USE : ICON_CONFIG;
     const char *css_class = is_in_use ? "config-item" : "config-item";
 
     GtkWidget *item = widget_create_menu_item(config_name, icon_name, css_class);

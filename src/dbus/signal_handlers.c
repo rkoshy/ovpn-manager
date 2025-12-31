@@ -27,27 +27,16 @@ int attention_required_handler(sd_bus_message *m, void *userdata, sd_bus_error *
     }
 
     const char *session_path = sd_bus_message_get_path(m);
-    printf("\n");
-    printf("⚠️  Attention required for session: %s\n", session_path);
-    printf("   Type: %u, Group: %u\n", type, group);
-    printf("   Message: %s\n", message ? message : "(none)");
+
+    logger_info("AttentionRequired signal: session=%s, type=%u, group=%u",
+                session_path, type, group);
 
     /* Type 1 = Web authentication (OAuth) */
     if (type == 1 && message && strstr(message, "http") == message) {
-        printf("\n🔐 Web authentication required!\n");
-        printf("🌐 Opening browser for authentication...\n");
-        printf("   URL: %s\n", message);
-
-        /* Launch browser with xdg-open */
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd), "xdg-open '%s' >/dev/null 2>&1 &", message);
-        int ret = system(cmd);
-        (void)ret;
-
-        printf("\n");
-        printf("ℹ️  Please complete authentication in your browser.\n");
-        printf("   The VPN will connect automatically after you authenticate.\n");
-        printf("\n");
+        logger_info("Web authentication required, URL: %s", message);
+        /* Browser launch is handled by tray_icon_update_sessions to avoid duplicates */
+    } else if (message) {
+        logger_info("Attention message: %s", message);
     }
 
     return 0;

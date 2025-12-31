@@ -36,6 +36,20 @@ int logger_init(bool log_to_file, const char *log_file_path, LogLevel min_level,
 void logger_set_level(LogLevel level);
 
 /**
+ * Set verbosity level (0=quiet, 1=changes only, 2=detailed, 3=debug)
+ *
+ * @param level Verbosity level
+ */
+void logger_set_verbosity(int level);
+
+/**
+ * Get current verbosity level
+ *
+ * @return Current verbosity level
+ */
+int logger_get_verbosity(void);
+
+/**
  * Log a message (generic)
  *
  * @param level Log level

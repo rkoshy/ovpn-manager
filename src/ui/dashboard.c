@@ -6,9 +6,11 @@
 #include "../dbus/config_client.h"
 #include "../monitoring/bandwidth_monitor.h"
 #include "../utils/logger.h"
+#include "../utils/file_chooser.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -26,8 +28,6 @@ struct Dashboard {
     GtkWidget *connections_tab;
     GtkWidget *statistics_tab;
     GtkWidget *servers_tab;
-    GtkWidget *routing_tab;
-    GtkWidget *security_tab;
     /* Statistics widgets - card-based view */
     GtkWidget *stats_flowbox;      /* FlowBox container for stat cards */
     GtkWidget *stats_empty_state;  /* Empty state widget (shown when disconnected) */
@@ -39,9 +39,10 @@ struct Dashboard {
 };
 
 /* Forward declarations */
-static void on_window_delete(GtkWidget *widget, GdkEvent *event, gpointer data);
+static gboolean on_window_delete(GtkWidget *widget, GdkEvent *event, gpointer data);
 static void on_disconnect_clicked(GtkButton *button, gpointer data);
 static void on_connect_clicked(GtkButton *button, gpointer data);
+static void on_import_clicked(GtkButton *button, gpointer data);
 static void create_session_card(Dashboard *dashboard, VpnSession *session);
 static void create_config_card(Dashboard *dashboard, VpnConfig *config);
 static void create_import_config_row(Dashboard *dashboard);
@@ -202,7 +203,7 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
     /* Get bandwidth samples (last 60 seconds for sparkline) */
     BandwidthSample samples[60];
     unsigned int sample_count = 0;
-    if (bandwidth_monitor_get_samples(monitor, samples, 60, &sample_count) < 0 || sample_count < 2) {
+    if (bandwidth_monitor_get_samples(monitor, samples, 60, &sample_count) < 0 || sample_count == 0) {
         /* Draw a flat line at zero when no data */
         cairo_set_source_rgba(cr, 0.2, 0.8, 0.4, 0.3);
         cairo_move_to(cr, margin, margin + (height - 2 * margin) / 2);
@@ -210,6 +211,30 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
         cairo_stroke(cr);
         return TRUE;
     }
+
+    /* Filter out samples with timestamp=0 */
+    BandwidthSample valid_samples[60];
+    unsigned int valid_count = 0;
+    for (unsigned int i = 0; i < sample_count; i++) {
+        if (samples[i].timestamp > 0) {
+            valid_samples[valid_count++] = samples[i];
+        }
+    }
+
+    if (valid_count == 0) {
+        /* No valid samples */
+        cairo_set_source_rgba(cr, 0.2, 0.8, 0.4, 0.3);
+        cairo_move_to(cr, margin, margin + (height - 2 * margin) / 2);
+        cairo_line_to(cr, width - margin, margin + (height - 2 * margin) / 2);
+        cairo_stroke(cr);
+        return TRUE;
+    }
+
+    /* Copy valid samples back */
+    for (unsigned int i = 0; i < valid_count; i++) {
+        samples[i] = valid_samples[i];
+    }
+    sample_count = valid_count;
 
     /* Find max rate for scaling */
     double max_rate = 0.0;
@@ -230,10 +255,33 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
         if (download_rate > max_rate) max_rate = download_rate;
     }
 
-    if (max_rate < 1024.0) max_rate = 1024.0;  /* Minimum 1 KB/s scale */
+    /* Use adaptive minimum scale: if there's no traffic, use small scale; otherwise 1 KB/s */
+    if (max_rate < 10.0) {
+        max_rate = 10.0;  /* 10 B/s minimum for idle connections */
+    } else if (max_rate < 1024.0) {
+        max_rate = 1024.0;  /* 1 KB/s scale for active connections */
+    }
 
     int graph_width = width - 2 * margin;
     int graph_height = height - 2 * margin;
+
+    /* Special case: if only one sample, draw points instead of lines */
+    if (sample_count == 1) {
+        double x = margin + graph_width;  /* Right edge */
+        double y = margin + graph_height;  /* Bottom (zero rate) */
+
+        /* Draw download point (green) */
+        cairo_set_source_rgba(cr, 0.2, 0.8, 0.4, 0.8);
+        cairo_arc(cr, x, y, 4.0, 0, 2 * M_PI);
+        cairo_fill(cr);
+
+        /* Draw upload point (blue) */
+        cairo_set_source_rgba(cr, 0.2, 0.5, 0.95, 0.8);
+        cairo_arc(cr, x, y, 4.0, 0, 2 * M_PI);
+        cairo_fill(cr);
+
+        return TRUE;
+    }
 
     /* Draw download line (green) with gradient fill */
     cairo_set_line_width(cr, 2.0);
@@ -241,11 +289,19 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
 
     gboolean first_point = TRUE;
+    double last_y = margin + graph_height;  /* Track last Y for extending to oldest sample */
     for (unsigned int i = 0; i < sample_count - 1; i++) {
-        double rate = (samples[i].bytes_in - samples[i+1].bytes_in) /
-                     (double)(samples[i].timestamp - samples[i+1].timestamp);
-        double x = margin + graph_width - (i * graph_width / 60.0);
+        time_t time_diff = samples[i].timestamp - samples[i+1].timestamp;
+        if (time_diff <= 0) {
+            continue;  /* Skip invalid samples */
+        }
+
+        double rate = (samples[i].bytes_in - samples[i+1].bytes_in) / (double)time_diff;
+        /* Use time-based positioning: newer samples on right, older scroll left */
+        double time_offset = samples[0].timestamp - samples[i].timestamp;
+        double x = margin + graph_width - (time_offset * graph_width / 60.0);
         double y = margin + graph_height - (rate / max_rate * graph_height);
+        last_y = y;
 
         if (first_point) {
             cairo_move_to(cr, x, y);
@@ -255,9 +311,20 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
         }
     }
 
-    /* Complete the path to create a filled area */
-    cairo_line_to(cr, margin, margin + graph_height);
-    cairo_line_to(cr, margin + graph_width, margin + graph_height);
+    /* Extend line to the oldest sample's position to complete the graph */
+    double fill_left_x = margin;  /* Default: left margin */
+    if (!first_point && sample_count >= 2) {
+        double oldest_time_offset = samples[0].timestamp - samples[sample_count - 1].timestamp;
+        double oldest_x = margin + graph_width - (oldest_time_offset * graph_width / 60.0);
+        /* Clamp to visible area */
+        if (oldest_x < margin) oldest_x = margin;
+        cairo_line_to(cr, oldest_x, last_y);
+        fill_left_x = oldest_x;
+    }
+
+    /* Complete the path to create a filled area - go down then right along bottom */
+    cairo_line_to(cr, fill_left_x, margin + graph_height);  /* Down to bottom at current X */
+    cairo_line_to(cr, margin + graph_width, margin + graph_height);  /* Right along bottom */
     cairo_close_path(cr);
 
     /* Create gradient fill from opaque to transparent */
@@ -276,11 +343,19 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
     cairo_set_line_width(cr, 2.0);
 
     first_point = TRUE;
+    last_y = margin + graph_height;  /* Reset for upload graph */
     for (unsigned int i = 0; i < sample_count - 1; i++) {
-        double rate = (samples[i].bytes_out - samples[i+1].bytes_out) /
-                     (double)(samples[i].timestamp - samples[i+1].timestamp);
-        double x = margin + graph_width - (i * graph_width / 60.0);
+        time_t time_diff = samples[i].timestamp - samples[i+1].timestamp;
+        if (time_diff <= 0) {
+            continue;  /* Skip invalid samples */
+        }
+
+        double rate = (samples[i].bytes_out - samples[i+1].bytes_out) / (double)time_diff;
+        /* Use time-based positioning: newer samples on right, older scroll left */
+        double time_offset = samples[0].timestamp - samples[i].timestamp;
+        double x = margin + graph_width - (time_offset * graph_width / 60.0);
         double y = margin + graph_height - (rate / max_rate * graph_height);
+        last_y = y;
 
         if (first_point) {
             cairo_move_to(cr, x, y);
@@ -290,9 +365,20 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
         }
     }
 
-    /* Complete the path to create a filled area */
-    cairo_line_to(cr, margin, margin + graph_height);
-    cairo_line_to(cr, margin + graph_width, margin + graph_height);
+    /* Extend line to the oldest sample's position to complete the graph */
+    fill_left_x = margin;  /* Reset for upload graph */
+    if (!first_point && sample_count >= 2) {
+        double oldest_time_offset = samples[0].timestamp - samples[sample_count - 1].timestamp;
+        double oldest_x = margin + graph_width - (oldest_time_offset * graph_width / 60.0);
+        /* Clamp to visible area */
+        if (oldest_x < margin) oldest_x = margin;
+        cairo_line_to(cr, oldest_x, last_y);
+        fill_left_x = oldest_x;
+    }
+
+    /* Complete the path to create a filled area - go down then right along bottom */
+    cairo_line_to(cr, fill_left_x, margin + graph_height);  /* Down to bottom at current X */
+    cairo_line_to(cr, margin + graph_width, margin + graph_height);  /* Right along bottom */
     cairo_close_path(cr);
 
     /* Create gradient fill from opaque to transparent */
@@ -620,17 +706,17 @@ static GtkWidget* create_vpn_stat_card(Dashboard *dashboard, VpnSession *session
 }
 
 /**
- * Window delete event handler
+ * Window delete event handler - hide instead of destroy
  */
-static void on_window_delete(GtkWidget *widget, GdkEvent *event, gpointer data) {
+static gboolean on_window_delete(GtkWidget *widget, GdkEvent *event, gpointer data) {
     (void)event;
-    (void)data;  /* Dashboard pointer not needed for hide */
+    (void)data;
 
     /* Hide instead of destroy */
     gtk_widget_hide(widget);
 
-    /* Return TRUE to prevent default destroy */
-    g_signal_stop_emission_by_name(widget, "delete-event");
+    /* Return TRUE to prevent window destruction */
+    return TRUE;
 }
 
 /**
@@ -676,6 +762,91 @@ static void on_connect_clicked(GtkButton *button, gpointer data) {
         /* Update dashboard after connect */
         dashboard_update(dashboard, dashboard->bus);
     }
+}
+
+/**
+ * Import button callback
+ */
+static void on_import_clicked(GtkButton *button, gpointer data) {
+    (void)button;
+    Dashboard *dashboard = (Dashboard *)data;
+
+    if (!dashboard || !dashboard->bus) {
+        logger_error("No D-Bus connection available");
+        dialog_show_error("Import Error", "No D-Bus connection available");
+        return;
+    }
+
+    /* Show file chooser */
+    char *file_path = file_chooser_select_ovpn("Import OpenVPN Configuration");
+    if (!file_path) {
+        return;
+    }
+
+    logger_info("Selected file: %s", file_path);
+
+    /* Read file contents */
+    char *contents = NULL;
+    char *error = NULL;
+    int r = file_read_contents(file_path, &contents, &error);
+
+    if (r < 0) {
+        logger_error("Failed to read file: %s", error ? error : "Unknown error");
+        dialog_show_error("Import Error", error ? error : "Failed to read file");
+        g_free(error);
+        g_free(file_path);
+        return;
+    }
+
+    /* Extract default config name from filename */
+    char *basename = g_path_get_basename(file_path);
+    char *default_name = g_strdup(basename);
+
+    /* Remove .ovpn or .conf extension */
+    char *dot = strrchr(default_name, '.');
+    if (dot && (strcmp(dot, ".ovpn") == 0 || strcmp(dot, ".conf") == 0)) {
+        *dot = '\0';
+    }
+
+    /* Prompt user for config name */
+    char *config_name = dialog_get_text_input(
+        "Import Configuration",
+        "Configuration name:",
+        default_name
+    );
+
+    g_free(default_name);
+    g_free(basename);
+
+    if (!config_name) {
+        logger_info("Import cancelled by user");
+        g_free(contents);
+        g_free(file_path);
+        return;
+    }
+
+    /* Import configuration with persistent=true */
+    char *config_path = NULL;
+    r = config_import(dashboard->bus, config_name, contents, false, true, &config_path);
+
+    if (r < 0) {
+        logger_error("Failed to import configuration: %s", config_name);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Failed to import configuration '%s'.\n\nCheck if the configuration already exists.", config_name);
+        dialog_show_error("Import Error", msg);
+    } else {
+        logger_info("Successfully imported persistent configuration: %s -> %s", config_name, config_path);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Configuration '%s' imported successfully.", config_name);
+        dialog_show_info("Import Successful", msg);
+        g_free(config_path);
+        /* Update dashboard to show new config */
+        dashboard_update(dashboard, dashboard->bus);
+    }
+
+    g_free(config_name);
+    g_free(contents);
+    g_free(file_path);
 }
 
 /**
@@ -875,31 +1046,21 @@ static void create_config_card(Dashboard *dashboard, VpnConfig *config) {
 }
 
 /**
- * Create the "Import Config" special row at the end of the list
+ * Create the "Import Config" row with button at the end of the list
  */
 static void create_import_config_row(Dashboard *dashboard) {
     /* Create list box row */
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
 
-    /* Add CSS class for special styling */
-    GtkStyleContext *row_context = gtk_widget_get_style_context(row);
-    gtk_style_context_add_class(row_context, "import-config-row");
-
     /* Row content box */
     GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_container_set_border_width(GTK_CONTAINER(row_box), 12);
 
-    /* Plus icon + label */
-    GtkWidget *icon_label = gtk_label_new("+");
-    gtk_widget_set_size_request(icon_label, 20, 20);
-    gtk_box_pack_start(GTK_BOX(row_box), icon_label, FALSE, FALSE, 0);
-
-    GtkWidget *import_label = gtk_label_new("Import new configuration...");
-    gtk_label_set_xalign(GTK_LABEL(import_label), 0.0);
-    GtkStyleContext *label_context = gtk_widget_get_style_context(import_label);
-    gtk_style_context_add_class(label_context, "dim-label");
-    gtk_box_pack_start(GTK_BOX(row_box), import_label, TRUE, TRUE, 0);
+    /* Import button */
+    GtkWidget *import_btn = gtk_button_new_with_label("+ Import");
+    g_signal_connect(import_btn, "clicked", G_CALLBACK(on_import_clicked), dashboard);
+    gtk_box_pack_start(GTK_BOX(row_box), import_btn, FALSE, FALSE, 0);
 
     gtk_container_add(GTK_CONTAINER(row), row_box);
     gtk_container_add(GTK_CONTAINER(dashboard->configs_container), row);
@@ -1049,22 +1210,6 @@ Dashboard* dashboard_create(void) {
     dashboard->servers_tab = servers_tab_get_widget(dashboard->servers_tab_instance);
     gtk_notebook_append_page(GTK_NOTEBOOK(dashboard->notebook), dashboard->servers_tab,
                             gtk_label_new("Servers"));
-
-    /* Tab 4: Routing (placeholder) */
-    dashboard->routing_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_container_set_border_width(GTK_CONTAINER(dashboard->routing_tab), 20);
-    GtkWidget *routing_label = gtk_label_new("Routing/Split Tunneling tab - Coming in Phase 4");
-    gtk_box_pack_start(GTK_BOX(dashboard->routing_tab), routing_label, TRUE, TRUE, 0);
-    gtk_notebook_append_page(GTK_NOTEBOOK(dashboard->notebook), dashboard->routing_tab,
-                            gtk_label_new("Routing"));
-
-    /* Tab 5: Security (placeholder) */
-    dashboard->security_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_container_set_border_width(GTK_CONTAINER(dashboard->security_tab), 20);
-    GtkWidget *security_label = gtk_label_new("Security/Kill Switch tab - Coming in Phase 5");
-    gtk_box_pack_start(GTK_BOX(dashboard->security_tab), security_label, TRUE, TRUE, 0);
-    gtk_notebook_append_page(GTK_NOTEBOOK(dashboard->notebook), dashboard->security_tab,
-                            gtk_label_new("Security"));
 
     /* Initialize bandwidth monitors hash table */
     dashboard->bandwidth_monitors = g_hash_table_new_full(

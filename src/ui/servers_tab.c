@@ -1,4 +1,5 @@
 #include "servers_tab.h"
+#include "icons.h"
 #include "../utils/logger.h"
 #include "../monitoring/ping_util.h"
 #include "../dbus/session_client.h"
@@ -237,7 +238,7 @@ GtkWidget* servers_tab_get_widget(ServersTab *tab) {
 static void update_server_row(ServersTab *tab, ServerInfo *server, GtkTreeIter *iter) {
     const char *status_icon = NULL;
     if (server->connected) {
-        status_icon = "emblem-default";  /* Green checkmark icon */
+        status_icon = ICON_STATUS_ACTIVE;  /* Active connection indicator */
     }
 
     char latency_text[32];

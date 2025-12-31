@@ -16,6 +16,7 @@ static struct {
     bool use_syslog;
     FILE *log_file;
     LogLevel min_level;
+    int verbosity;  /* 0=quiet, 1=changes only, 2=detailed, 3=debug */
     GMutex mutex;  /* For thread safety */
 } logger_state = {
     .initialized = false,
@@ -23,6 +24,7 @@ static struct {
     .use_syslog = false,
     .log_file = NULL,
     .min_level = LOG_LEVEL_INFO,
+    .verbosity = 0,
 };
 
 /* Log level names */
@@ -142,6 +144,26 @@ void logger_set_level(LogLevel level) {
     g_mutex_lock(&logger_state.mutex);
     logger_state.min_level = level;
     g_mutex_unlock(&logger_state.mutex);
+}
+
+/**
+ * Set verbosity level
+ */
+void logger_set_verbosity(int level) {
+    g_mutex_lock(&logger_state.mutex);
+    logger_state.verbosity = level;
+    g_mutex_unlock(&logger_state.mutex);
+}
+
+/**
+ * Get current verbosity level
+ */
+int logger_get_verbosity(void) {
+    int level;
+    g_mutex_lock(&logger_state.mutex);
+    level = logger_state.verbosity;
+    g_mutex_unlock(&logger_state.mutex);
+    return level;
 }
 
 /**

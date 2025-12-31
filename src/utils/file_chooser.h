@@ -25,4 +25,30 @@ char* file_chooser_select_ovpn(const char *title);
  */
 int file_read_contents(const char *file_path, char **contents, char **error);
 
+/**
+ * Show a dialog to get text input from user
+ *
+ * @param title Dialog title
+ * @param prompt Label text for the entry
+ * @param default_value Initial value for the entry (can be NULL)
+ * @return User-entered text (must be freed with g_free), or NULL if cancelled
+ */
+char* dialog_get_text_input(const char *title, const char *prompt, const char *default_value);
+
+/**
+ * Show an error message dialog
+ *
+ * @param title Dialog title
+ * @param message Error message to display
+ */
+void dialog_show_error(const char *title, const char *message);
+
+/**
+ * Show an info message dialog
+ *
+ * @param title Dialog title
+ * @param message Info message to display
+ */
+void dialog_show_info(const char *title, const char *message);
+
 #endif /* FILE_CHOOSER_H */

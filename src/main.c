@@ -24,6 +24,73 @@ static guint timer_update_id = 0;
 static guint dashboard_timer_id = 0;
 static gboolean app_held = FALSE;  /* Track if g_application_hold was called */
 
+/* Command-line options */
+static gchar *log_level_str = NULL;
+static gint verbosity = 0;
+
+/* Command-line option entries */
+static GOptionEntry option_entries[] = {
+    { "log-level", 'l', 0, G_OPTION_ARG_STRING, &log_level_str,
+      "Set log level (debug, info, warn, error). Default: warn", "LEVEL" },
+    { "verbose", 'v', 0, G_OPTION_ARG_INT, &verbosity,
+      "Set verbosity level (0=quiet, 1=changes only, 2=detailed, 3=debug). Default: 0", "LEVEL" },
+    { NULL }
+};
+
+/**
+ * Parse log level string to LogLevel enum
+ */
+static LogLevel parse_log_level(const char *level_str) {
+    if (!level_str) {
+        return LOG_LEVEL_WARN;  /* Default */
+    }
+
+    if (g_ascii_strcasecmp(level_str, "debug") == 0) {
+        return LOG_LEVEL_DEBUG;
+    } else if (g_ascii_strcasecmp(level_str, "info") == 0) {
+        return LOG_LEVEL_INFO;
+    } else if (g_ascii_strcasecmp(level_str, "warn") == 0 ||
+               g_ascii_strcasecmp(level_str, "warning") == 0) {
+        return LOG_LEVEL_WARN;
+    } else if (g_ascii_strcasecmp(level_str, "error") == 0) {
+        return LOG_LEVEL_ERROR;
+    } else {
+        fprintf(stderr, "Invalid log level '%s'. Using default 'warn'.\n", level_str);
+        fprintf(stderr, "Valid levels: debug, info, warn, error\n");
+        return LOG_LEVEL_WARN;
+    }
+}
+
+/**
+ * Command-line handler
+ */
+static gint on_command_line(GApplication *application,
+                            GApplicationCommandLine *cmdline,
+                            gpointer user_data) {
+    (void)user_data;
+
+    /* Get the option context */
+    GVariantDict *options = g_application_command_line_get_options_dict(cmdline);
+
+    /* Extract log-level option if provided */
+    const gchar *level = NULL;
+    if (g_variant_dict_lookup(options, "log-level", "&s", &level)) {
+        g_free(log_level_str);
+        log_level_str = g_strdup(level);
+    }
+
+    /* Extract verbosity option if provided */
+    gint verb = 0;
+    if (g_variant_dict_lookup(options, "verbose", "i", &verb)) {
+        verbosity = verb;
+    }
+
+    /* Activate the application (which will initialize everything) */
+    g_application_activate(application);
+
+    return 0;  /* Success */
+}
+
 /**
  * GTK/Tray event processing callback
  */
@@ -197,7 +264,9 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
     setup_signal_handlers();
 
     /* Initialize logger system (must be early) */
-    logger_init(false, NULL, LOG_LEVEL_INFO, true);
+    LogLevel log_level = parse_log_level(log_level_str);
+    logger_init(false, NULL, log_level, true);
+    logger_set_verbosity(verbosity);
 
     /* Print banner to terminal (keep as printf for direct user output) */
     printf("OpenVPN3 Manager v0.1.0\n");
@@ -301,14 +370,18 @@ int main(int argc, char *argv[]) {
     int status;
 
     /* Create GApplication for single-instance support */
-    app = g_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
+    app = g_application_new(APP_ID, G_APPLICATION_HANDLES_COMMAND_LINE);
     if (!app) {
         /* Logger not initialized yet, use fprintf */
         fprintf(stderr, "Failed to create GApplication\n");
         return EXIT_FAILURE;
     }
 
+    /* Add command-line options */
+    g_application_add_main_option_entries(G_APPLICATION(app), option_entries);
+
     /* Connect signals */
+    g_signal_connect(app, "command-line", G_CALLBACK(on_command_line), NULL);
     g_signal_connect(app, "activate", G_CALLBACK(on_app_activate), NULL);
     g_signal_connect(app, "shutdown", G_CALLBACK(on_app_shutdown), NULL);
 
