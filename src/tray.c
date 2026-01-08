@@ -3,6 +3,7 @@
 #include "dbus/config_client.h"
 #include "utils/file_chooser.h"
 #include "utils/logger.h"
+#include "utils/connection_fsm.h"
 #include "ui/widgets.h"
 #include "ui/icons.h"
 #include "ui/dashboard.h"
@@ -77,16 +78,7 @@ typedef struct {
 
 /* === NEW UNIFIED CONNECTION STRUCTURES === */
 
-/* Connection states */
-typedef enum {
-    CONN_STATE_DISCONNECTED,     /* Config available, no session */
-    CONN_STATE_CONNECTING,       /* Session connecting */
-    CONN_STATE_CONNECTED,        /* Session connected */
-    CONN_STATE_PAUSED,           /* Session paused */
-    CONN_STATE_AUTH_REQUIRED,    /* Session needs auth */
-    CONN_STATE_ERROR,            /* Session in error state */
-    CONN_STATE_RECONNECTING      /* Session reconnecting */
-} ConnectionState;
+/* ConnectionState enum now defined in connection_fsm.h */
 
 /* Unified callback data for connections */
 typedef struct {
@@ -117,6 +109,9 @@ typedef struct {
     char *config_name;           /* Display name */
     ConnectionState state;
     time_t connect_time;
+
+    /* FSM for state management */
+    ConnectionFsm *fsm;          /* State machine instance */
 } ConnectionMenuItem;
 
 /* Merged connection data (temporary struct for building menu) */
@@ -530,34 +525,46 @@ static ConnectionState get_state_from_session(VpnSession *session) {
     }
 
     ConnectionState state;
+    const char *session_state_name = NULL;
+
     switch (session->state) {
         case SESSION_STATE_CONNECTING:
             state = CONN_STATE_CONNECTING;
+            session_state_name = "SESSION_STATE_CONNECTING";
             break;
         case SESSION_STATE_CONNECTED:
             state = CONN_STATE_CONNECTED;
+            session_state_name = "SESSION_STATE_CONNECTED";
             break;
         case SESSION_STATE_PAUSED:
             state = CONN_STATE_PAUSED;
+            session_state_name = "SESSION_STATE_PAUSED";
             break;
         case SESSION_STATE_AUTH_REQUIRED:
             state = CONN_STATE_AUTH_REQUIRED;
+            session_state_name = "SESSION_STATE_AUTH_REQUIRED";
             break;
         case SESSION_STATE_ERROR:
             state = CONN_STATE_ERROR;
+            session_state_name = "SESSION_STATE_ERROR";
             break;
         case SESSION_STATE_RECONNECTING:
             state = CONN_STATE_RECONNECTING;
+            session_state_name = "SESSION_STATE_RECONNECTING";
             break;
         case SESSION_STATE_DISCONNECTED:
         default:
             state = CONN_STATE_DISCONNECTED;
+            session_state_name = "SESSION_STATE_DISCONNECTED";
             break;
     }
 
-    if (logger_get_verbosity() >= 3) {
-        logger_debug("Mapped session state %d to connection state %d for session %s",
-                     session->state, state, session->session_path ? session->session_path : "NULL");
+    if (logger_get_verbosity() >= 2) {
+        logger_info("D-Bus session state: %s (%d) -> Connection state: %s, session_path=%s, config_name=%s",
+                    session_state_name, session->state,
+                    connection_fsm_state_name(state),
+                    session->session_path ? session->session_path : "NULL",
+                    session->config_name ? session->config_name : "NULL");
     }
 
     return state;
@@ -608,6 +615,10 @@ static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_cou
     /* Allocate array for merged connections */
     ConnectionInfo *connections = g_malloc0(sizeof(ConnectionInfo) * config_count);
 
+    if (logger_get_verbosity() >= 2) {
+        logger_info("Merging connections: %u configs, %u active sessions", config_count, session_count);
+    }
+
     /* Build connection list from configs */
     for (unsigned int i = 0; i < config_count; i++) {
         VpnConfig *config = configs[i];
@@ -619,6 +630,7 @@ static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_cou
         connections[i].connect_time = 0;
 
         /* Try to match this config to an active session */
+        bool found_session = false;
         for (unsigned int j = 0; j < session_count; j++) {
             VpnSession *session = sessions[j];
 
@@ -631,8 +643,21 @@ static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_cou
                     session->session_path,
                     session->session_created
                 );
+                found_session = true;
+
+                if (logger_get_verbosity() >= 2) {
+                    logger_info("  Config '%s' matched to session (state=%s, session_path=%s)",
+                               config->config_name,
+                               connection_fsm_state_name(connections[i].state),
+                               session->session_path ? session->session_path : "NULL");
+                }
                 break;  /* One session per config for now */
             }
+        }
+
+        if (!found_session && logger_get_verbosity() >= 2) {
+            logger_info("  Config '%s' has no active session (state=DISCONNECTED)",
+                       config->config_name);
         }
     }
 
@@ -740,90 +765,38 @@ static void format_connection_label(ConnectionInfo *conn, char *buffer, size_t s
 }
 
 /**
- * Set action button states based on connection state
+ * Set action button states based on connection FSM state
  */
-static void set_action_states(ConnectionMenuItem *item, ConnectionState state) {
-    if (!item) {
+static void set_action_states(ConnectionMenuItem *item) {
+    if (!item || !item->fsm) {
+        logger_error("set_action_states called with NULL item or FSM");
         return;
     }
 
-    if (logger_get_verbosity() >= 3) {
-        logger_debug("set_action_states called: config=%s, state=%d",
-                     item->config_name ? item->config_name : "unknown", state);
-    }
-
-    /* Default: disable all */
-    bool connect_enabled = false;
-    bool disconnect_enabled = false;
-    bool pause_enabled = false;
-    bool resume_enabled = false;
-    bool auth_enabled = false;
-
-    /* Set based on state */
-    switch (state) {
-        case CONN_STATE_DISCONNECTED:
-            connect_enabled = true;
-            break;
-
-        case CONN_STATE_CONNECTING:
-        case CONN_STATE_RECONNECTING:
-            disconnect_enabled = true;
-            break;
-
-        case CONN_STATE_ERROR:
-            /* Allow retry on error */
-            connect_enabled = true;
-            disconnect_enabled = true;
-            break;
-
-        case CONN_STATE_CONNECTED:
-            disconnect_enabled = true;
-            pause_enabled = true;
-            break;
-
-        case CONN_STATE_PAUSED:
-            disconnect_enabled = true;
-            resume_enabled = true;
-            break;
-
-        case CONN_STATE_AUTH_REQUIRED:
-            disconnect_enabled = true;
-            auth_enabled = true;
-            break;
-    }
+    /* Get button states from FSM */
+    ConnectionButtonStates button_states = connection_fsm_get_button_states(item->fsm);
+    ConnectionState current_state = connection_fsm_get_state(item->fsm);
 
     if (logger_get_verbosity() >= 3) {
-        logger_debug("  Action states: connect=%d, disconnect=%d, pause=%d, resume=%d, auth=%d",
-                     connect_enabled, disconnect_enabled, pause_enabled, resume_enabled, auth_enabled);
-        logger_debug("  Widget pointers: connect=%p, disconnect=%p, pause=%p, resume=%p, auth=%p",
-                     item->connect_item, item->disconnect_item, item->pause_item,
-                     item->resume_item, item->auth_item);
+        logger_debug("set_action_states called: config=%s, FSM state=%s",
+                     item->config_name ? item->config_name : "unknown",
+                     connection_fsm_state_name(current_state));
+        logger_debug("  Button states from FSM: connect=%d, disconnect=%d, pause=%d, resume=%d, auth=%d",
+                     button_states.connect_enabled, button_states.disconnect_enabled,
+                     button_states.pause_enabled, button_states.resume_enabled,
+                     button_states.auth_enabled);
     }
 
     /* Apply states to widgets */
-    gtk_widget_set_sensitive(item->connect_item, connect_enabled);
-    gtk_widget_set_sensitive(item->disconnect_item, disconnect_enabled);
-    gtk_widget_set_sensitive(item->pause_item, pause_enabled);
-    gtk_widget_set_sensitive(item->resume_item, resume_enabled);
-    gtk_widget_set_sensitive(item->auth_item, auth_enabled);
-
-    /* Force AppIndicator to refresh menu item state by re-showing widgets
-     * AppIndicator caches menu state, so we need to trigger a refresh */
-    gtk_widget_show(item->connect_item);
-    gtk_widget_show(item->disconnect_item);
-    gtk_widget_show(item->pause_item);
-    gtk_widget_show(item->resume_item);
-    gtk_widget_show(item->auth_item);
-
-    /* Also refresh the submenu container */
-    gtk_widget_show_all(item->submenu);
+    gtk_widget_set_sensitive(item->connect_item, button_states.connect_enabled);
+    gtk_widget_set_sensitive(item->disconnect_item, button_states.disconnect_enabled);
+    gtk_widget_set_sensitive(item->pause_item, button_states.pause_enabled);
+    gtk_widget_set_sensitive(item->resume_item, button_states.resume_enabled);
+    gtk_widget_set_sensitive(item->auth_item, button_states.auth_enabled);
 
     if (logger_get_verbosity() >= 3) {
         logger_debug("  Applied sensitivity - disconnect is now: %s",
                      gtk_widget_get_sensitive(item->disconnect_item) ? "SENSITIVE" : "INSENSITIVE");
-
-        logger_debug("Action states for connection (state=%d): Connect=%d, Disconnect=%d, Pause=%d, Resume=%d, Auth=%d",
-                     state, connect_enabled, disconnect_enabled, pause_enabled, resume_enabled, auth_enabled);
     }
 }
 
@@ -833,6 +806,12 @@ static void set_action_states(ConnectionMenuItem *item, ConnectionState state) {
 static void free_connection_menu_item(ConnectionMenuItem *item) {
     if (!item) {
         return;
+    }
+
+    /* Destroy FSM */
+    if (item->fsm) {
+        connection_fsm_destroy(item->fsm);
+        item->fsm = NULL;
     }
 
     /* Free callback data */
@@ -864,6 +843,50 @@ static ConnectionMenuItem* create_connection_menu_item(TrayIcon *tray, sd_bus *b
     item->config_name = g_strdup(conn->config_name);
     item->state = conn->state;
     item->connect_time = conn->connect_time;
+
+    /* Create FSM for this connection */
+    item->fsm = connection_fsm_create(conn->config_name);
+    if (!item->fsm) {
+        logger_error("Failed to create FSM for connection '%s'", conn->config_name);
+        g_free(item->config_path);
+        g_free(item->session_path);
+        g_free(item->config_name);
+        g_free(item);
+        return NULL;
+    }
+
+    /* Initialize FSM state based on current connection state */
+    ConnectionFsmEvent initial_event;
+    switch (conn->state) {
+        case CONN_STATE_CONNECTING:
+            initial_event = FSM_EVENT_SESSION_CONNECTING;
+            connection_fsm_process_event(item->fsm, initial_event);
+            break;
+        case CONN_STATE_CONNECTED:
+            initial_event = FSM_EVENT_SESSION_CONNECTED;
+            connection_fsm_process_event(item->fsm, initial_event);
+            break;
+        case CONN_STATE_PAUSED:
+            initial_event = FSM_EVENT_SESSION_PAUSED;
+            connection_fsm_process_event(item->fsm, initial_event);
+            break;
+        case CONN_STATE_AUTH_REQUIRED:
+            initial_event = FSM_EVENT_SESSION_AUTH_REQUIRED;
+            connection_fsm_process_event(item->fsm, initial_event);
+            break;
+        case CONN_STATE_ERROR:
+            initial_event = FSM_EVENT_SESSION_ERROR;
+            connection_fsm_process_event(item->fsm, initial_event);
+            break;
+        case CONN_STATE_RECONNECTING:
+            initial_event = FSM_EVENT_SESSION_RECONNECTING;
+            connection_fsm_process_event(item->fsm, initial_event);
+            break;
+        case CONN_STATE_DISCONNECTED:
+        default:
+            /* Already in DISCONNECTED state - no event needed */
+            break;
+    }
 
     /* Format initial label (includes status symbol) */
     char label[256];
@@ -910,8 +933,8 @@ static ConnectionMenuItem* create_connection_menu_item(TrayIcon *tray, sd_bus *b
     /* Attach submenu to parent */
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(item->parent_item), item->submenu);
 
-    /* Set initial action states */
-    set_action_states(item, conn->state);
+    /* Set initial action states from FSM */
+    set_action_states(item);
 
     /* Insert at alphabetically sorted position before static section */
     GList *children = gtk_container_get_children(GTK_CONTAINER(tray->menu));
@@ -929,15 +952,67 @@ static ConnectionMenuItem* create_connection_menu_item(TrayIcon *tray, sd_bus *b
 }
 
 /**
+ * Map connection state to FSM event
+ * This determines which event to send to the FSM based on observed state
+ */
+static ConnectionFsmEvent map_state_to_event(ConnectionState new_state) {
+    switch (new_state) {
+        case CONN_STATE_CONNECTING:
+            return FSM_EVENT_SESSION_CONNECTING;
+        case CONN_STATE_CONNECTED:
+            return FSM_EVENT_SESSION_CONNECTED;
+        case CONN_STATE_PAUSED:
+            return FSM_EVENT_SESSION_PAUSED;
+        case CONN_STATE_AUTH_REQUIRED:
+            return FSM_EVENT_SESSION_AUTH_REQUIRED;
+        case CONN_STATE_ERROR:
+            return FSM_EVENT_SESSION_ERROR;
+        case CONN_STATE_RECONNECTING:
+            return FSM_EVENT_SESSION_RECONNECTING;
+        case CONN_STATE_DISCONNECTED:
+        default:
+            return FSM_EVENT_SESSION_DISCONNECTED;
+    }
+}
+
+/**
  * Update an existing connection menu item
  */
 static void update_connection_menu_item(ConnectionMenuItem *item, ConnectionInfo *conn, sd_bus *bus) {
-    if (!item || !conn) {
+    if (!item || !conn || !item->fsm) {
+        logger_error("update_connection_menu_item called with NULL item, conn, or FSM");
         return;
     }
 
-    /* Update state tracking */
-    item->state = conn->state;
+    ConnectionState old_state = item->state;
+    ConnectionState new_state = conn->state;
+
+    /* Process state change through FSM */
+    if (old_state != new_state) {
+        logger_info("Connection '%s' state: %s -> %s, session_path: %s -> %s",
+                    conn->config_name ? conn->config_name : "unknown",
+                    connection_fsm_state_name(old_state),
+                    connection_fsm_state_name(new_state),
+                    item->session_path ? item->session_path : "(null)",
+                    conn->session_path ? conn->session_path : "(null)");
+
+        /* Determine FSM event from new state */
+        ConnectionFsmEvent event = map_state_to_event(new_state);
+
+        /* Process event through FSM */
+        ConnectionState fsm_result = connection_fsm_process_event(item->fsm, event);
+
+        /* Update our tracked state to match FSM state */
+        item->state = fsm_result;
+    } else if (logger_get_verbosity() >= 2) {
+        logger_info("Connection '%s' state: %s (no change), session_path: %s -> %s",
+                    conn->config_name ? conn->config_name : "unknown",
+                    connection_fsm_state_name(old_state),
+                    item->session_path ? item->session_path : "(null)",
+                    conn->session_path ? conn->session_path : "(null)");
+    }
+
+    /* Update connect time */
     item->connect_time = conn->connect_time;
 
     /* Update session path if changed */
@@ -955,8 +1030,8 @@ static void update_connection_menu_item(ConnectionMenuItem *item, ConnectionInfo
     format_connection_label(conn, label, sizeof(label));
     gtk_menu_item_set_label(GTK_MENU_ITEM(item->parent_item), label);
 
-    /* Update action states */
-    set_action_states(item, conn->state);
+    /* Update action states from FSM */
+    set_action_states(item);
 
     /* Auto-launch browser for authentication if required */
     if (conn->state == CONN_STATE_AUTH_REQUIRED && conn->session_path && bus) {

@@ -7,6 +7,7 @@ vendor_sources = files(
 util_sources = files(
   'utils/logger.c',
   'utils/file_chooser.c',
+  'utils/connection_fsm.c',
 )
 # Will add: string_utils.c, validation.c
 
