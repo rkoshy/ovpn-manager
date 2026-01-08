@@ -773,15 +773,25 @@ static void set_action_states(ConnectionMenuItem *item) {
         return;
     }
 
+    /* Check for NULL widget pointers */
+    if (!item->connect_item || !item->disconnect_item || !item->pause_item ||
+        !item->resume_item || !item->auth_item) {
+        logger_error("set_action_states: NULL widget pointers for config=%s (connect=%p, disconnect=%p, pause=%p, resume=%p, auth=%p)",
+                     item->config_name ? item->config_name : "unknown",
+                     item->connect_item, item->disconnect_item, item->pause_item,
+                     item->resume_item, item->auth_item);
+        return;
+    }
+
     /* Get button states from FSM */
     ConnectionButtonStates button_states = connection_fsm_get_button_states(item->fsm);
     ConnectionState current_state = connection_fsm_get_state(item->fsm);
 
-    if (logger_get_verbosity() >= 3) {
-        logger_debug("set_action_states called: config=%s, FSM state=%s",
+    /* Log at INFO level for visibility at verbosity 2+ */
+    if (logger_get_verbosity() >= 2) {
+        logger_info("set_action_states: config=%s, FSM state=%s, buttons: connect=%d, disconnect=%d, pause=%d, resume=%d, auth=%d",
                      item->config_name ? item->config_name : "unknown",
-                     connection_fsm_state_name(current_state));
-        logger_debug("  Button states from FSM: connect=%d, disconnect=%d, pause=%d, resume=%d, auth=%d",
+                     connection_fsm_state_name(current_state),
                      button_states.connect_enabled, button_states.disconnect_enabled,
                      button_states.pause_enabled, button_states.resume_enabled,
                      button_states.auth_enabled);
@@ -795,7 +805,8 @@ static void set_action_states(ConnectionMenuItem *item) {
     gtk_widget_set_sensitive(item->auth_item, button_states.auth_enabled);
 
     if (logger_get_verbosity() >= 3) {
-        logger_debug("  Applied sensitivity - disconnect is now: %s",
+        logger_debug("  Applied sensitivity - connect is now: %s, disconnect is now: %s",
+                     gtk_widget_get_sensitive(item->connect_item) ? "SENSITIVE" : "INSENSITIVE",
                      gtk_widget_get_sensitive(item->disconnect_item) ? "SENSITIVE" : "INSENSITIVE");
     }
 }
