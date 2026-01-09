@@ -273,7 +273,7 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
     logger_info("Log level: %d, Verbosity: %d", log_level, verbosity);
 
     /* Print banner to terminal (keep as printf for direct user output) */
-    printf("OpenVPN3 Manager v0.1.0\n");
+    printf("OpenVPN3 Manager v0.4.0\n");
     printf("========================\n");
     printf("Logs: ~/.local/share/ovpn-manager/app.log\n\n");
 
