@@ -147,9 +147,9 @@ build_in_docker() {
             mkdir -p \$PKG_DIR/etc/xdg/autostart
 
             cp builddir/src/${APP_NAME}                                  \$PKG_DIR/usr/bin/
-            cp data/ovpn-manager.desktop                                 \$PKG_DIR/usr/share/applications/
-            cp data/ovpn-manager.desktop                                 \$PKG_DIR/etc/xdg/autostart/
-            cp data/icons/hicolor/scalable/apps/ovpn-manager.svg         \$PKG_DIR/usr/share/icons/hicolor/scalable/apps/
+            install -m 644 data/ovpn-manager.desktop                     \$PKG_DIR/usr/share/applications/
+            install -m 644 data/ovpn-manager.desktop                     \$PKG_DIR/etc/xdg/autostart/
+            install -m 644 data/icons/hicolor/scalable/apps/ovpn-manager.svg \$PKG_DIR/usr/share/icons/hicolor/scalable/apps/
 
             # Control file
             cat > \$PKG_DIR/DEBIAN/control <<EOF
