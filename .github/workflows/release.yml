@@ -1,23 +1,21 @@
 # GitHub Actions Release Workflow for OpenVPN3 Manager
 # Triggers on version tags (v*.*.*) and creates GitHub releases with .deb packages
+# Uses pre-built scorussolutions/gtk3-deb-builder images with all deps
 
 name: Release
 
 on:
   push:
     tags:
-      - 'v*.*.*'  # Semantic versioning: v1.0.0, v2.1.3, etc.
+      - 'v*.*.*'
 
 permissions:
-  contents: write  # Required for creating releases
+  contents: write
 
 env:
   APP_NAME: ovpn-manager
 
 jobs:
-  #
-  # Build binaries for both Debian versions
-  #
   build:
     name: Build - Debian ${{ matrix.debian }}
     runs-on: ubuntu-latest
@@ -25,9 +23,9 @@ jobs:
       matrix:
         include:
           - debian: "12"
-            image: "debian:12"
+            image: "scorussolutions/gtk3-deb-builder-d12:latest"
           - debian: "13"
-            image: "debian:trixie"
+            image: "scorussolutions/gtk3-deb-builder-d13:latest"
     container:
       image: ${{ matrix.image }}
 
@@ -40,44 +38,21 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Building version ${VERSION} for Debian ${{ matrix.debian }}"
 
-      - name: Install build dependencies
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq \
-            build-essential \
-            pkg-config \
-            python3 \
-            python3-pip \
-            ninja-build \
-            libglib2.0-dev \
-            libsystemd-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            libcairo2-dev
-          pip3 install --quiet --break-system-packages meson
-
-      - name: Configure build
+      - name: Configure and build
         run: |
           meson setup builddir --buildtype=release --prefix=/usr
-
-      - name: Build
-        run: |
           ninja -C builddir
-          strip builddir/src/ovpn-manager
-          ls -lh builddir/src/ovpn-manager
+          strip builddir/src/${{ env.APP_NAME }}
+          echo "Binary size: $(ls -lh builddir/src/${{ env.APP_NAME }} | awk '{print $5}')"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-debian${{ matrix.debian }}
-          path: builddir/src/ovpn-manager
+          path: builddir/src/${{ env.APP_NAME }}
           retention-days: 1
 
-  #
-  # Create .deb packages
-  #
   package:
     name: Package - Debian ${{ matrix.debian }}
     runs-on: ubuntu-latest
@@ -86,9 +61,9 @@ jobs:
       matrix:
         include:
           - debian: "12"
-            image: "debian:12"
+            image: "scorussolutions/gtk3-deb-builder-d12:latest"
           - debian: "13"
-            image: "debian:trixie"
+            image: "scorussolutions/gtk3-deb-builder-d13:latest"
     container:
       image: ${{ matrix.image }}
 
@@ -102,11 +77,6 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Install packaging tools
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq dpkg-dev fakeroot
-
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
@@ -114,31 +84,30 @@ jobs:
           path: builddir/src/
 
       - name: Make binary executable
-        run: chmod +x builddir/src/ovpn-manager
+        run: chmod +x builddir/src/${{ env.APP_NAME }}
 
       - name: Create .deb package
         run: |
           VERSION=${{ steps.version.outputs.version }}
           PACKAGE_NAME="${APP_NAME}_${VERSION}_debian${{ matrix.debian }}_amd64"
 
-          echo "Creating package: ${PACKAGE_NAME}.deb"
-
           # Create package directory structure
-          mkdir -p debian-package/DEBIAN
-          mkdir -p debian-package/usr/bin
-          mkdir -p debian-package/usr/share/applications
-          mkdir -p debian-package/usr/share/icons/hicolor/scalable/apps
-          mkdir -p debian-package/etc/xdg/autostart
+          PKG_DIR=$(mktemp -d)
+          mkdir -p $PKG_DIR/DEBIAN
+          mkdir -p $PKG_DIR/usr/bin
+          mkdir -p $PKG_DIR/usr/share/applications
+          mkdir -p $PKG_DIR/usr/share/icons/hicolor/scalable/apps
+          mkdir -p $PKG_DIR/etc/xdg/autostart
 
-          # Copy files
-          cp builddir/src/ovpn-manager debian-package/usr/bin/
-          cp data/ovpn-manager.desktop debian-package/usr/share/applications/
-          cp data/ovpn-manager.desktop debian-package/etc/xdg/autostart/
-          cp data/icons/hicolor/scalable/apps/ovpn-manager.svg debian-package/usr/share/icons/hicolor/scalable/apps/
+          # Copy files with correct permissions
+          cp builddir/src/${APP_NAME} $PKG_DIR/usr/bin/
+          install -m 644 data/ovpn-manager.desktop $PKG_DIR/usr/share/applications/
+          install -m 644 data/ovpn-manager.desktop $PKG_DIR/etc/xdg/autostart/
+          install -m 644 data/icons/hicolor/scalable/apps/ovpn-manager.svg $PKG_DIR/usr/share/icons/hicolor/scalable/apps/
 
-          # Create control file
-          cat > debian-package/DEBIAN/control <<EOF
-          Package: ovpn-manager
+          # Control file
+          cat > $PKG_DIR/DEBIAN/control <<EOF
+          Package: ${APP_NAME}
           Version: ${VERSION}
           Section: net
           Priority: optional
@@ -150,9 +119,11 @@ jobs:
            Lightweight, event-driven VPN manager with real-time monitoring,
            server selection, and advanced features for power users.
           EOF
+          # Remove leading whitespace from control file (heredoc indentation)
+          sed -i 's/^          //' $PKG_DIR/DEBIAN/control
 
-          # Create postinst script to update icon cache
-          cat > debian-package/DEBIAN/postinst <<'POSTINST'
+          # postinst
+          cat > $PKG_DIR/DEBIAN/postinst <<'POSTINST'
           #!/bin/sh
           set -e
           if command -v gtk-update-icon-cache >/dev/null 2>&1; then
@@ -162,10 +133,11 @@ jobs:
               update-desktop-database /usr/share/applications 2>/dev/null || true
           fi
           POSTINST
-          chmod 755 debian-package/DEBIAN/postinst
+          sed -i 's/^          //' $PKG_DIR/DEBIAN/postinst
+          chmod 755 $PKG_DIR/DEBIAN/postinst
 
-          # Create postrm script to update icon cache on removal
-          cat > debian-package/DEBIAN/postrm <<'POSTRM'
+          # postrm
+          cat > $PKG_DIR/DEBIAN/postrm <<'POSTRM'
           #!/bin/sh
           set -e
           if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
@@ -177,16 +149,12 @@ jobs:
               fi
           fi
           POSTRM
-          chmod 755 debian-package/DEBIAN/postrm
+          sed -i 's/^          //' $PKG_DIR/DEBIAN/postrm
+          chmod 755 $PKG_DIR/DEBIAN/postrm
 
-          # Build package
-          fakeroot dpkg-deb --build debian-package
-          mv debian-package.deb ${PACKAGE_NAME}.deb
-
-          # Show package info
+          # Build the .deb
+          dpkg-deb --build $PKG_DIR ${PACKAGE_NAME}.deb
           dpkg-deb --info ${PACKAGE_NAME}.deb
-
-          # Generate checksum
           sha256sum ${PACKAGE_NAME}.deb > ${PACKAGE_NAME}.deb.sha256
 
       - name: Upload package artifact
@@ -198,9 +166,6 @@ jobs:
             *.sha256
           retention-days: 1
 
-  #
-  # Create GitHub Release with all artifacts
-  #
   release:
     name: Create Release
     runs-on: ubuntu-latest
@@ -215,8 +180,6 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-          # Check if this is a pre-release
           if [[ "$VERSION" == *"-"* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
           else
@@ -233,22 +196,17 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p release-assets
 
-          # Copy and rename binaries
-          cp artifacts/binary-debian12/ovpn-manager release-assets/ovpn-manager-${VERSION}-debian12-linux-amd64
-          cp artifacts/binary-debian13/ovpn-manager release-assets/ovpn-manager-${VERSION}-debian13-linux-amd64
+          cp artifacts/binary-debian12/${{ env.APP_NAME }} release-assets/${{ env.APP_NAME }}-${VERSION}-debian12-linux-amd64
+          cp artifacts/binary-debian13/${{ env.APP_NAME }} release-assets/${{ env.APP_NAME }}-${VERSION}-debian13-linux-amd64
 
-          # Copy packages and checksums
           cp artifacts/package-debian12/*.deb release-assets/
           cp artifacts/package-debian12/*.sha256 release-assets/
           cp artifacts/package-debian13/*.deb release-assets/
           cp artifacts/package-debian13/*.sha256 release-assets/
 
-          # Generate checksums for binaries
           cd release-assets
-          sha256sum ovpn-manager-${VERSION}-debian12-linux-amd64 > ovpn-manager-${VERSION}-debian12-linux-amd64.sha256
-          sha256sum ovpn-manager-${VERSION}-debian13-linux-amd64 > ovpn-manager-${VERSION}-debian13-linux-amd64.sha256
-
-          # Create combined checksum file
+          sha256sum ${{ env.APP_NAME }}-${VERSION}-debian12-linux-amd64 > ${{ env.APP_NAME }}-${VERSION}-debian12-linux-amd64.sha256
+          sha256sum ${{ env.APP_NAME }}-${VERSION}-debian13-linux-amd64 > ${{ env.APP_NAME }}-${VERSION}-debian13-linux-amd64.sha256
           cat *.sha256 > SHA256SUMS.txt
 
           echo "Release assets:"
@@ -270,15 +228,15 @@ jobs:
 
             ### Debian 12 (Bookworm)
             ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ovpn-manager_${{ steps.version.outputs.version }}_debian12_amd64.deb
-            sudo dpkg -i ovpn-manager_${{ steps.version.outputs.version }}_debian12_amd64.deb
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.APP_NAME }}_${{ steps.version.outputs.version }}_debian12_amd64.deb
+            sudo dpkg -i ${{ env.APP_NAME }}_${{ steps.version.outputs.version }}_debian12_amd64.deb
             sudo apt-get install -f  # Install any missing dependencies
             ```
 
             ### Debian 13 (Trixie)
             ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ovpn-manager_${{ steps.version.outputs.version }}_debian13_amd64.deb
-            sudo dpkg -i ovpn-manager_${{ steps.version.outputs.version }}_debian13_amd64.deb
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.APP_NAME }}_${{ steps.version.outputs.version }}_debian13_amd64.deb
+            sudo dpkg -i ${{ env.APP_NAME }}_${{ steps.version.outputs.version }}_debian13_amd64.deb
             sudo apt-get install -f  # Install any missing dependencies
             ```
 
