@@ -1,4 +1,5 @@
 #include "session_client.h"
+#include "config_client.h"
 #include "signal_handlers.h"
 #include "../utils/logger.h"
 #include <stdio.h>
@@ -290,14 +291,40 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
     }
 
     /* Determine session state
-     * Priority: 1) auth required, 2) connected_to property, 3) error messages, 4) status codes, 5) other messages
+     * Priority: 1) auth required, 2) paused, 3) connected_to property,
+     *           4) error messages, 5) status codes, 6) other messages
+     *
+     * IMPORTANT: Paused must be checked before connected_to because a paused
+     * session still has valid connection metadata (protocol, host, port) in
+     * the connected_to D-Bus property — checking connected first would
+     * incorrectly report CONNECTED instead of PAUSED.
+     *
+     * OpenVPN3 reports paused sessions as major=2 ("Connection") with
+     * minor=13 (CONN_PAUSING) or minor=14 (CONN_PAUSED). The status
+     * message text is often empty, so we must check the minor code.
+     *
+     * OpenVPN3 StatusMinor codes (major=2 CONNECTION):
+     *   7  = CONN_CONNECTED
+     *  13  = CONN_PAUSING
+     *  14  = CONN_PAUSED
+     *  15  = CONN_RESUMING
      */
+    bool is_paused = (major == 4) ||
+                     (major == 2 && (minor == 13 || minor == 14));
+
     if (needs_auth) {
         /* Session is waiting for authentication */
         if (logger_get_verbosity() >= 1) {
             logger_debug("  -> Setting state: AUTH_REQUIRED");
         }
         session->state = SESSION_STATE_AUTH_REQUIRED;
+    } else if (is_paused) {
+        /* PAUSED — must be before connected check */
+        if (logger_get_verbosity() >= 1) {
+            logger_debug("  -> Setting state: PAUSED (major=%u, msg='%s')",
+                         major, session->status_message ? session->status_message : "");
+        }
+        session->state = SESSION_STATE_PAUSED;
     } else if (connected) {
         if (logger_get_verbosity() >= 1) {
             logger_debug("  -> Setting state: CONNECTED");
@@ -319,12 +346,6 @@ VpnSession* session_get_info(sd_bus *bus, const char *session_path) {
             logger_debug("  -> Setting state: CONNECTING (major=2)");
         }
         session->state = SESSION_STATE_CONNECTING;
-    } else if (major == 4) {
-        /* PAUSED status */
-        if (logger_get_verbosity() >= 1) {
-            logger_debug("  -> Setting state: PAUSED (major=4)");
-        }
-        session->state = SESSION_STATE_PAUSED;
     } else if (session->status_message) {
         /* Fallback to message parsing for other states */
         if (strstr(session->status_message, "authentication required") ||
@@ -700,6 +721,45 @@ int session_get_auth_url(sd_bus *bus, const char *session_path, char **auth_url)
 }
 
 /**
+ * Disconnect any existing sessions for the same config.
+ * Prevents duplicate connections on the same profile.
+ */
+static void disconnect_existing_sessions(sd_bus *bus, const char *config_path) {
+    if (!bus || !config_path) {
+        return;
+    }
+
+    /* Get config name from config path */
+    VpnConfig *config = config_get_info(bus, config_path);
+    if (!config || !config->config_name) {
+        config_free(config);
+        return;
+    }
+
+    /* List active sessions */
+    VpnSession **sessions = NULL;
+    unsigned int count = 0;
+    int r = session_list(bus, &sessions, &count);
+    if (r < 0 || !sessions || count == 0) {
+        config_free(config);
+        return;
+    }
+
+    /* Disconnect any session whose config_name matches */
+    for (unsigned int i = 0; i < count; i++) {
+        if (sessions[i]->config_name &&
+            strcmp(sessions[i]->config_name, config->config_name) == 0) {
+            logger_warn("Disconnected existing session for '%s' (path=%s) before reconnect",
+                        config->config_name, sessions[i]->session_path);
+            session_disconnect(bus, sessions[i]->session_path);
+        }
+    }
+
+    session_list_free(sessions, count);
+    config_free(config);
+}
+
+/**
  * Start a new VPN session from a configuration
  */
 int session_start(sd_bus *bus, const char *config_path, char **session_path) {
@@ -713,6 +773,9 @@ int session_start(sd_bus *bus, const char *config_path, char **session_path) {
     }
 
     *session_path = NULL;
+
+    /* Disconnect any existing sessions for this config to prevent duplicates */
+    disconnect_existing_sessions(bus, config_path);
 
     /* Call NewTunnel method to create session from config */
     r = sd_bus_call_method(

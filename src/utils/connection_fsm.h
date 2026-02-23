@@ -97,4 +97,13 @@ const char* connection_fsm_state_name(ConnectionState state);
  */
 const char* connection_fsm_event_name(ConnectionFsmEvent event);
 
+/**
+ * Force FSM to a specific state, bypassing transition rules.
+ * Used to re-sync when FSM state diverges from observed D-Bus state.
+ * Logs a warning when called.
+ * @param fsm FSM instance
+ * @param state Target state to force
+ */
+void connection_fsm_force_state(ConnectionFsm *fsm, ConnectionState state);
+
 #endif /* CONNECTION_FSM_H */

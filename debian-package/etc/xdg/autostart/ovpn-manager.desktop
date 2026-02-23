@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenVPN3 Manager
+Comment=Lightweight system tray manager for OpenVPN3 connections
+Exec=ovpn-manager
+Icon=ovpn-manager
+Terminal=false
+Categories=Network;System;GTK;
+Keywords=VPN;OpenVPN;Network;Security;Privacy;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

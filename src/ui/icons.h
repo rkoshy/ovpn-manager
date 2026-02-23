@@ -55,4 +55,10 @@
 #define ICON_TRAY_DISCONNECTED "network-vpn-symbolic"           /* No VPN connections */
 #define ICON_TRAY_ATTENTION "network-error-symbolic"            /* Error/needs attention */
 
+/* Per-connection VPN tray indicator icons (one AppIndicator per connection) */
+#define ICON_TRAY_VPN_CONNECTED   "network-vpn-symbolic"           /* Connected */
+#define ICON_TRAY_VPN_DISCONNECTED "network-vpn-disabled-symbolic" /* Disconnected */
+#define ICON_TRAY_VPN_ACQUIRING   "network-vpn-acquiring-symbolic" /* Connecting/reconnecting */
+#define ICON_TRAY_APP             "preferences-system-symbolic"    /* App gear icon */
+
 #endif /* ICONS_H */

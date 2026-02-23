@@ -27,6 +27,11 @@ static const StateTransition transition_table[] = {
     /* From DISCONNECTED */
     {CONN_STATE_DISCONNECTED, FSM_EVENT_CONNECT_REQUESTED,     CONN_STATE_CONNECTING},
     {CONN_STATE_DISCONNECTED, FSM_EVENT_SESSION_CONNECTING,    CONN_STATE_CONNECTING},
+    {CONN_STATE_DISCONNECTED, FSM_EVENT_SESSION_DISCONNECTED,  CONN_STATE_DISCONNECTED},  /* self (poll no-op) */
+    {CONN_STATE_DISCONNECTED, FSM_EVENT_SESSION_CONNECTED,     CONN_STATE_CONNECTED},     /* app restart: VPN already up */
+    {CONN_STATE_DISCONNECTED, FSM_EVENT_SESSION_AUTH_REQUIRED,  CONN_STATE_AUTH_REQUIRED}, /* app restart: VPN waiting for auth */
+    {CONN_STATE_DISCONNECTED, FSM_EVENT_SESSION_PAUSED,        CONN_STATE_PAUSED},        /* app restart: VPN paused */
+    {CONN_STATE_DISCONNECTED, FSM_EVENT_SESSION_ERROR,         CONN_STATE_ERROR},          /* app restart: VPN in error */
 
     /* From CONNECTING */
     {CONN_STATE_CONNECTING, FSM_EVENT_SESSION_CONNECTED,       CONN_STATE_CONNECTED},
@@ -34,6 +39,7 @@ static const StateTransition transition_table[] = {
     {CONN_STATE_CONNECTING, FSM_EVENT_SESSION_ERROR,           CONN_STATE_ERROR},
     {CONN_STATE_CONNECTING, FSM_EVENT_SESSION_DISCONNECTED,    CONN_STATE_DISCONNECTED},
     {CONN_STATE_CONNECTING, FSM_EVENT_DISCONNECT_REQUESTED,    CONN_STATE_DISCONNECTED},
+    {CONN_STATE_CONNECTING, FSM_EVENT_SESSION_CONNECTING,      CONN_STATE_CONNECTING},    /* self (poll no-op) */
 
     /* From CONNECTED */
     {CONN_STATE_CONNECTED, FSM_EVENT_SESSION_PAUSED,           CONN_STATE_PAUSED},
@@ -41,6 +47,7 @@ static const StateTransition transition_table[] = {
     {CONN_STATE_CONNECTED, FSM_EVENT_SESSION_DISCONNECTED,     CONN_STATE_DISCONNECTED},
     {CONN_STATE_CONNECTED, FSM_EVENT_DISCONNECT_REQUESTED,     CONN_STATE_DISCONNECTED},
     {CONN_STATE_CONNECTED, FSM_EVENT_SESSION_ERROR,            CONN_STATE_ERROR},
+    {CONN_STATE_CONNECTED, FSM_EVENT_SESSION_CONNECTED,        CONN_STATE_CONNECTED},     /* self (poll no-op) */
 
     /* From PAUSED */
     {CONN_STATE_PAUSED, FSM_EVENT_SESSION_RESUMED,             CONN_STATE_CONNECTED},
@@ -48,6 +55,7 @@ static const StateTransition transition_table[] = {
     {CONN_STATE_PAUSED, FSM_EVENT_SESSION_DISCONNECTED,        CONN_STATE_DISCONNECTED},
     {CONN_STATE_PAUSED, FSM_EVENT_DISCONNECT_REQUESTED,        CONN_STATE_DISCONNECTED},
     {CONN_STATE_PAUSED, FSM_EVENT_SESSION_ERROR,               CONN_STATE_ERROR},
+    {CONN_STATE_PAUSED, FSM_EVENT_SESSION_PAUSED,              CONN_STATE_PAUSED},        /* self (poll no-op) */
 
     /* From AUTH_REQUIRED */
     {CONN_STATE_AUTH_REQUIRED, FSM_EVENT_SESSION_CONNECTED,    CONN_STATE_CONNECTED},
@@ -55,6 +63,7 @@ static const StateTransition transition_table[] = {
     {CONN_STATE_AUTH_REQUIRED, FSM_EVENT_SESSION_DISCONNECTED, CONN_STATE_DISCONNECTED},
     {CONN_STATE_AUTH_REQUIRED, FSM_EVENT_DISCONNECT_REQUESTED, CONN_STATE_DISCONNECTED},
     {CONN_STATE_AUTH_REQUIRED, FSM_EVENT_SESSION_ERROR,        CONN_STATE_ERROR},
+    {CONN_STATE_AUTH_REQUIRED, FSM_EVENT_SESSION_AUTH_REQUIRED, CONN_STATE_AUTH_REQUIRED}, /* self (poll no-op) */
 
     /* From ERROR */
     {CONN_STATE_ERROR, FSM_EVENT_SESSION_DISCONNECTED,         CONN_STATE_DISCONNECTED},
@@ -62,6 +71,7 @@ static const StateTransition transition_table[] = {
     {CONN_STATE_ERROR, FSM_EVENT_CONNECT_REQUESTED,            CONN_STATE_CONNECTING},
     {CONN_STATE_ERROR, FSM_EVENT_SESSION_CONNECTING,           CONN_STATE_CONNECTING},
     {CONN_STATE_ERROR, FSM_EVENT_SESSION_CONNECTED,            CONN_STATE_CONNECTED},
+    {CONN_STATE_ERROR, FSM_EVENT_SESSION_ERROR,                CONN_STATE_ERROR},          /* self (poll no-op) */
 
     /* From RECONNECTING */
     {CONN_STATE_RECONNECTING, FSM_EVENT_SESSION_CONNECTED,     CONN_STATE_CONNECTED},
@@ -69,6 +79,7 @@ static const StateTransition transition_table[] = {
     {CONN_STATE_RECONNECTING, FSM_EVENT_SESSION_DISCONNECTED,  CONN_STATE_DISCONNECTED},
     {CONN_STATE_RECONNECTING, FSM_EVENT_DISCONNECT_REQUESTED,  CONN_STATE_DISCONNECTED},
     {CONN_STATE_RECONNECTING, FSM_EVENT_SESSION_ERROR,         CONN_STATE_ERROR},
+    {CONN_STATE_RECONNECTING, FSM_EVENT_SESSION_RECONNECTING,  CONN_STATE_RECONNECTING},  /* self (poll no-op) */
 };
 
 static const size_t transition_table_size = sizeof(transition_table) / sizeof(transition_table[0]);
@@ -257,6 +268,24 @@ ConnectionState connection_fsm_process_event(ConnectionFsm *fsm, ConnectionFsmEv
     }
 
     return fsm->current_state;
+}
+
+/**
+ * Force FSM to a specific state (bypassing transition rules)
+ */
+void connection_fsm_force_state(ConnectionFsm *fsm, ConnectionState state) {
+    if (!fsm) {
+        logger_error("NULL FSM in force_state");
+        return;
+    }
+
+    ConnectionState old_state = fsm->current_state;
+    fsm->current_state = state;
+
+    logger_warn("FSM '%s': Force-syncing state %s -> %s (D-Bus reality override)",
+                fsm->connection_name ? fsm->connection_name : "unknown",
+                connection_fsm_state_name(old_state),
+                connection_fsm_state_name(state));
 }
 
 /**

@@ -4,7 +4,6 @@
 #include "utils/file_chooser.h"
 #include "utils/logger.h"
 #include "utils/connection_fsm.h"
-#include "ui/widgets.h"
 #include "ui/icons.h"
 #include "ui/dashboard.h"
 #include <stdlib.h>
@@ -17,328 +16,65 @@
 /* External global variables from main.c */
 extern Dashboard *dashboard;
 
-/**
- * TrayIcon structure
- */
+/* ──────────────────────────────────────────────────────────────
+ * Data structures
+ * ────────────────────────────────────────────────────────────── */
+
+/* Per-connection tray indicator */
+typedef struct {
+    AppIndicator *indicator;       /* Separate AppIndicator per connection */
+    GtkWidget *menu;               /* Flat menu, rebuilt on state change */
+    char *config_path;             /* Stable identifier */
+    char *config_name;             /* Display name */
+    char *session_path;            /* NULL if disconnected */
+    ConnectionState state;         /* Current state */
+    time_t connect_time;           /* For elapsed time display */
+    sd_bus *bus;                   /* D-Bus connection (borrowed) */
+} ConnectionIndicator;
+
+/* App-level tray indicator (global actions) */
 struct TrayIcon {
-    AppIndicator *indicator;
-    GtkWidget *menu;
+    AppIndicator *indicator;       /* The [gear] icon */
+    GtkWidget *menu;               /* Dashboard, Import, Settings, Quit */
     char *tooltip;
+    GHashTable *connections;       /* config_path -> ConnectionIndicator* */
+    sd_bus *bus;                   /* D-Bus connection (borrowed, set on first update) */
+    gboolean app_menu_built;       /* Whether app menu has been built */
 };
 
-/* Callback data for session menu items */
-typedef struct {
-    sd_bus *bus;
-    char *session_path;
-} SessionCallbackData;
-
-/* Callback data for config menu items */
-typedef struct {
-    sd_bus *bus;
-    char *config_path;
-} ConfigCallbackData;
-
-/* Session timing data */
-typedef struct {
-    char *session_path;
-    time_t connect_time;
-} SessionTiming;
-
-/* Global session timing array */
-static GHashTable *session_timings = NULL;
-
-/* Global hash table to store timer label widgets for efficient updates */
-static GHashTable *timer_labels = NULL;  /* session_path -> GtkWidget* (label) */
-
-/* Global hash table to track which sessions have had browser launched for auth */
-static GHashTable *auth_launched = NULL;  /* session_path -> gboolean */
-
-/* Menu item tracking for persistent menu structure */
-typedef struct {
-    GtkWidget *parent_item;      /* The main menu item (parent) */
-    GtkWidget *submenu;          /* The submenu container */
-    GtkWidget *device_item;      /* Device name metadata item */
-    GtkWidget *disconnect_item;  /* Disconnect button */
-    GtkWidget *pause_item;       /* Pause button */
-    GtkWidget *resume_item;      /* Resume button */
-    GtkWidget *auth_item;        /* Authenticate button */
-    SessionCallbackData *disconnect_data;
-    SessionCallbackData *pause_data;
-    SessionCallbackData *resume_data;
-    SessionCallbackData *auth_data;
-} SessionMenuItem;
-
-typedef struct {
-    GtkWidget *parent_item;      /* The main config menu item */
-    GtkWidget *submenu;          /* The submenu container */
-    GtkWidget *connect_item;     /* Connect button */
-    GtkWidget *status_item;      /* "(In use)" status item */
-    ConfigCallbackData *connect_data;
-} ConfigMenuItem;
-
-/* === NEW UNIFIED CONNECTION STRUCTURES === */
-
-/* ConnectionState enum now defined in connection_fsm.h */
-
-/* Unified callback data for connections */
-typedef struct {
-    sd_bus *bus;
-    char *config_path;           /* Always set */
-    char *session_path;          /* NULL if disconnected */
-} ConnectionCallbackData;
-
-/* Unified connection menu item */
-typedef struct {
-    GtkWidget *parent_item;      /* Main menu item with state label */
-    GtkWidget *submenu;          /* Submenu container */
-
-    /* All action items (always present) */
-    GtkWidget *connect_item;
-    GtkWidget *disconnect_item;
-    GtkWidget *pause_item;
-    GtkWidget *resume_item;
-    GtkWidget *auth_item;
-    GtkWidget *metadata_item;    /* Device/status info */
-
-    /* Callback data */
-    ConnectionCallbackData *callback_data;
-
-    /* State tracking */
-    char *config_path;           /* Stable identifier (hash key) */
-    char *session_path;          /* NULL if disconnected */
-    char *config_name;           /* Display name */
-    ConnectionState state;
-    time_t connect_time;
-
-    /* FSM for state management */
-    ConnectionFsm *fsm;          /* State machine instance */
-} ConnectionMenuItem;
-
-/* Merged connection data (temporary struct for building menu) */
+/* Merged connection data (temporary struct for building/updating) */
 typedef struct {
     char *config_path;
     char *config_name;
-    char *session_path;          /* NULL if no active session */
+    char *session_path;            /* NULL if no active session */
     ConnectionState state;
     time_t connect_time;
 } ConnectionInfo;
 
-/* === END NEW STRUCTURES === */
+/* ──────────────────────────────────────────────────────────────
+ * Static state
+ * ────────────────────────────────────────────────────────────── */
 
-/* Hash tables for persistent menu items */
-static GHashTable *session_menu_items = NULL;  /* session_path -> SessionMenuItem* */
-static GHashTable *config_menu_items = NULL;   /* config_path -> ConfigMenuItem* */
-static GHashTable *connection_menu_items = NULL;  /* config_path -> ConnectionMenuItem* (NEW) */
+static GHashTable *session_timings = NULL;  /* session_path -> time_t */
+static GHashTable *auth_launched = NULL;    /* session_path -> TRUE */
 
-/* Static menu items that never change */
-static GtkWidget *static_section_sep = NULL;
-static GtkWidget *dashboard_item = NULL;
-static GtkWidget *import_item = NULL;
-static GtkWidget *settings_item = NULL;
-static GtkWidget *quit_item = NULL;
+/* ──────────────────────────────────────────────────────────────
+ * Forward declarations
+ * ────────────────────────────────────────────────────────────── */
 
-/* Dynamic section widgets */
-static GtkWidget *sessions_separator = NULL;
-static GtkWidget *no_sessions_item = NULL;
-static GtkWidget *configs_separator = NULL;
-static GtkWidget *configs_header = NULL;
-static GtkWidget *no_configs_item = NULL;
-static GtkWidget *loading_configs_item = NULL;
-
-/* NEW: Unified connections section */
-static GtkWidget *connections_header = NULL;
-static GtkWidget *no_connections_item = NULL;
-
-/* Forward declarations */
+static void on_connect(GtkMenuItem *item, gpointer data);
+static void on_disconnect(GtkMenuItem *item, gpointer data);
+static void on_pause(GtkMenuItem *item, gpointer data);
+static void on_resume(GtkMenuItem *item, gpointer data);
+static void on_cancel(GtkMenuItem *item, gpointer data);
+static void on_authenticate(GtkMenuItem *item, gpointer data);
 static void quit_callback(GtkMenuItem *item, gpointer user_data);
 static void show_dashboard_callback(GtkMenuItem *item, gpointer user_data);
-static void disconnect_callback(GtkMenuItem *item, gpointer user_data);
-static void pause_callback(GtkMenuItem *item, gpointer user_data);
-static void resume_callback(GtkMenuItem *item, gpointer user_data);
-static void authenticate_callback(GtkMenuItem *item, gpointer user_data);
 static void import_config_callback(GtkMenuItem *item, gpointer user_data);
-static void connect_config_callback(GtkMenuItem *item, gpointer user_data);
 
-/**
- * Initialize the system tray icon
- */
-TrayIcon* tray_icon_init(const char *tooltip) {
-    TrayIcon *tray = NULL;
-
-    /* Initialize GTK if not already initialized */
-    if (!gtk_init_check(NULL, NULL)) {
-        logger_error("Failed to initialize GTK");
-        return NULL;
-    }
-
-    /* Allocate tray structure */
-    tray = g_malloc0(sizeof(TrayIcon));
-    if (!tray) {
-        logger_error("Failed to allocate TrayIcon");
-        return NULL;
-    }
-
-    /* Create app indicator */
-    tray->indicator = app_indicator_new(
-        "ovpn-manager",
-        ICON_TRAY_IDLE,  /* Default tray icon */
-        APP_INDICATOR_CATEGORY_APPLICATION_STATUS
-    );
-
-    if (!tray->indicator) {
-        logger_error("Failed to create app indicator");
-        g_free(tray);
-        return NULL;
-    }
-
-    /* Set indicator status to active */
-    app_indicator_set_status(tray->indicator, APP_INDICATOR_STATUS_ACTIVE);
-
-    /* Set tooltip */
-    if (tooltip) {
-        tray->tooltip = g_strdup(tooltip);
-        app_indicator_set_title(tray->indicator, tooltip);
-    }
-
-    /* Create menu */
-    tray->menu = gtk_menu_new();
-
-    /* Set the menu */
-    app_indicator_set_menu(tray->indicator, GTK_MENU(tray->menu));
-
-    logger_info("System tray icon initialized");
-
-    return tray;
-}
-
-/**
- * Update the tray icon tooltip
- */
-void tray_icon_set_tooltip(TrayIcon *tray, const char *tooltip) {
-    if (!tray || !tooltip) {
-        return;
-    }
-
-    if (tray->tooltip) {
-        g_free(tray->tooltip);
-    }
-
-    tray->tooltip = g_strdup(tooltip);
-    app_indicator_set_title(tray->indicator, tooltip);
-}
-
-/**
- * Run the tray icon event loop (non-blocking)
- * This is called periodically by the GLib main loop
- */
-int tray_icon_run(TrayIcon *tray) {
-    if (!tray) {
-        return -1;
-    }
-
-    /* Process pending GTK events */
-    while (gtk_events_pending()) {
-        gtk_main_iteration_do(FALSE);
-    }
-
-    return 0;
-}
-
-/**
- * Free config callback data
- */
-static void free_config_callback_data(gpointer data) {
-    ConfigCallbackData *cbd = (ConfigCallbackData *)data;
-    if (cbd) {
-        g_free(cbd->config_path);
-        g_free(cbd);
-    }
-}
-
-/**
- * Quit callback
- */
-static void quit_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    (void)user_data;
-
-    logger_info("Quit menu item clicked");
-
-    /* Quit the GApplication */
-    extern GApplication *app;  /* Defined in main.c */
-    if (app) {
-        g_application_quit(app);
-    }
-}
-
-/**
- * Show dashboard callback
- */
-static void show_dashboard_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    (void)user_data;
-
-    logger_info("Show Dashboard menu item clicked");
-
-    if (dashboard) {
-        dashboard_show(dashboard);
-    }
-}
-
-/**
- * Free SessionMenuItem structure and its widgets
- */
-static void free_session_menu_item(SessionMenuItem *item) {
-    if (!item) {
-        return;
-    }
-
-    /* Destroy the parent widget (this destroys the submenu and all children) */
-    if (item->parent_item) {
-        gtk_widget_destroy(item->parent_item);
-    }
-
-    /* Free callback data */
-    if (item->disconnect_data) {
-        g_free(item->disconnect_data->session_path);
-        g_free(item->disconnect_data);
-    }
-    if (item->pause_data) {
-        g_free(item->pause_data->session_path);
-        g_free(item->pause_data);
-    }
-    if (item->resume_data) {
-        g_free(item->resume_data->session_path);
-        g_free(item->resume_data);
-    }
-    if (item->auth_data) {
-        g_free(item->auth_data->session_path);
-        g_free(item->auth_data);
-    }
-
-    g_free(item);
-}
-
-/**
- * Free ConfigMenuItem structure and its widgets
- */
-static void free_config_menu_item(ConfigMenuItem *item) {
-    if (!item) {
-        return;
-    }
-
-    /* Destroy the parent widget (this destroys the submenu and all children) */
-    if (item->parent_item) {
-        gtk_widget_destroy(item->parent_item);
-    }
-
-    /* Free callback data */
-    if (item->connect_data) {
-        free_config_callback_data(item->connect_data);
-    }
-
-    g_free(item);
-}
+/* ──────────────────────────────────────────────────────────────
+ * Utility functions
+ * ────────────────────────────────────────────────────────────── */
 
 /**
  * Format elapsed time as a human-readable string
@@ -381,7 +117,6 @@ static time_t get_session_start_time(const char *session_path, uint64_t session_
         return (time_t)(intptr_t)value;
     }
 
-    /* New session - use the actual session_created timestamp from D-Bus */
     time_t start_time = (time_t)session_created;
     g_hash_table_insert(session_timings, g_strdup(session_path), (gpointer)(intptr_t)start_time);
     return start_time;
@@ -397,70 +132,7 @@ static void remove_session_timing(const char *session_path) {
 }
 
 /**
- * Disconnect callback
- */
-static void disconnect_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    /* NEW: Support both old SessionCallbackData and new ConnectionCallbackData */
-    ConnectionCallbackData *data = (ConnectionCallbackData *)user_data;
-
-    if (!data || !data->bus || !data->session_path) {
-        return;
-    }
-
-    logger_info("Disconnecting session: %s", data->session_path);
-
-    int r = session_disconnect(data->bus, data->session_path);
-    if (r < 0) {
-        logger_error("Failed to disconnect session");
-    } else {
-        /* Remove timing entry on successful disconnect */
-        remove_session_timing(data->session_path);
-    }
-}
-
-/**
- * Pause callback
- */
-static void pause_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    /* NEW: Support both old SessionCallbackData and new ConnectionCallbackData */
-    ConnectionCallbackData *data = (ConnectionCallbackData *)user_data;
-
-    if (!data || !data->bus || !data->session_path) {
-        return;
-    }
-
-    logger_info("Pausing session: %s", data->session_path);
-
-    int r = session_pause(data->bus, data->session_path, "User requested");
-    if (r < 0) {
-        logger_error("Failed to pause session");
-    }
-}
-
-/**
- * Resume callback
- */
-static void resume_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    /* NEW: Support both old SessionCallbackData and new ConnectionCallbackData */
-    ConnectionCallbackData *data = (ConnectionCallbackData *)user_data;
-
-    if (!data || !data->bus || !data->session_path) {
-        return;
-    }
-
-    logger_info("Resuming session: %s", data->session_path);
-
-    int r = session_resume(data->bus, data->session_path);
-    if (r < 0) {
-        logger_error("Failed to resume session");
-    }
-}
-
-/**
- * Helper function to launch browser for authentication
+ * Launch browser for OAuth authentication
  */
 static void launch_auth_browser(sd_bus *bus, const char *session_path) {
     if (!bus || !session_path) {
@@ -489,7 +161,6 @@ static void launch_auth_browser(sd_bus *bus, const char *session_path) {
 
     logger_info("Opening browser for authentication: %s", auth_url);
 
-    /* Launch browser */
     char cmd[2048];
     snprintf(cmd, sizeof(cmd), "xdg-open '%s' >/dev/null 2>&1 &", auth_url);
     int ret = system(cmd);
@@ -497,24 +168,6 @@ static void launch_auth_browser(sd_bus *bus, const char *session_path) {
 
     g_free(auth_url);
 }
-
-/**
- * Authenticate callback - launch browser with OAuth URL
- */
-static void authenticate_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    /* NEW: Support both old SessionCallbackData and new ConnectionCallbackData */
-    ConnectionCallbackData *data = (ConnectionCallbackData *)user_data;
-
-    if (!data || !data->bus || !data->session_path) {
-        return;
-    }
-
-    /* Use the helper function */
-    launch_auth_browser(data->bus, data->session_path);
-}
-
-/* === NEW CONNECTION MANAGEMENT FUNCTIONS === */
 
 /**
  * Map VPN session state to connection state
@@ -525,43 +178,35 @@ static ConnectionState get_state_from_session(VpnSession *session) {
     }
 
     ConnectionState state;
-    const char *session_state_name = NULL;
 
     switch (session->state) {
         case SESSION_STATE_CONNECTING:
             state = CONN_STATE_CONNECTING;
-            session_state_name = "SESSION_STATE_CONNECTING";
             break;
         case SESSION_STATE_CONNECTED:
             state = CONN_STATE_CONNECTED;
-            session_state_name = "SESSION_STATE_CONNECTED";
             break;
         case SESSION_STATE_PAUSED:
             state = CONN_STATE_PAUSED;
-            session_state_name = "SESSION_STATE_PAUSED";
             break;
         case SESSION_STATE_AUTH_REQUIRED:
             state = CONN_STATE_AUTH_REQUIRED;
-            session_state_name = "SESSION_STATE_AUTH_REQUIRED";
             break;
         case SESSION_STATE_ERROR:
             state = CONN_STATE_ERROR;
-            session_state_name = "SESSION_STATE_ERROR";
             break;
         case SESSION_STATE_RECONNECTING:
             state = CONN_STATE_RECONNECTING;
-            session_state_name = "SESSION_STATE_RECONNECTING";
             break;
         case SESSION_STATE_DISCONNECTED:
         default:
             state = CONN_STATE_DISCONNECTED;
-            session_state_name = "SESSION_STATE_DISCONNECTED";
             break;
     }
 
     if (logger_get_verbosity() >= 2) {
-        logger_info("D-Bus session state: %s (%d) -> Connection state: %s, session_path=%s, config_name=%s",
-                    session_state_name, session->state,
+        logger_info("D-Bus session state: %d -> Connection state: %s, session_path=%s, config_name=%s",
+                    session->state,
                     connection_fsm_state_name(state),
                     session->session_path ? session->session_path : "NULL",
                     session->config_name ? session->config_name : "NULL");
@@ -585,7 +230,7 @@ static int compare_connections(const void *a, const void *b) {
 
 /**
  * Merge configs and sessions into a unified connection list
- * Returns array of ConnectionInfo (caller must free)
+ * Returns array of ConnectionInfo (caller must free with free_connection_info_array)
  */
 static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_count) {
     if (!bus || !out_count) {
@@ -600,7 +245,7 @@ static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_cou
     int r = config_list(bus, &configs, &config_count);
 
     if (r < 0 || !configs) {
-        return NULL;  /* No configs available */
+        return NULL;
     }
 
     /* Get all active sessions */
@@ -636,7 +281,6 @@ static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_cou
 
             if (session->config_name && config->config_name &&
                 strcmp(session->config_name, config->config_name) == 0) {
-                /* Found matching session */
                 connections[i].session_path = g_strdup(session->session_path);
                 connections[i].state = get_state_from_session(session);
                 connections[i].connect_time = get_session_start_time(
@@ -651,7 +295,7 @@ static ConnectionInfo* merge_connections_data(sd_bus *bus, unsigned int *out_cou
                                connection_fsm_state_name(connections[i].state),
                                session->session_path ? session->session_path : "NULL");
                 }
-                break;  /* One session per config for now */
+                break;
             }
         }
 
@@ -694,626 +338,427 @@ static void free_connection_info_array(ConnectionInfo *connections, unsigned int
     g_free(connections);
 }
 
+/* ──────────────────────────────────────────────────────────────
+ * Connection indicator helpers
+ * ────────────────────────────────────────────────────────────── */
+
 /**
- * Get status symbol for connection state
+ * Get the tray icon name for a connection state
  */
-static const char* get_status_symbol(ConnectionState state) {
+static const char* get_indicator_icon(ConnectionState state) {
+    switch (state) {
+        case CONN_STATE_DISCONNECTED: return ICON_TRAY_VPN_DISCONNECTED;
+        case CONN_STATE_CONNECTING:   return ICON_TRAY_VPN_ACQUIRING;
+        case CONN_STATE_CONNECTED:    return ICON_TRAY_VPN_CONNECTED;
+        case CONN_STATE_PAUSED:       return ICON_PAUSED;
+        case CONN_STATE_AUTH_REQUIRED: return ICON_AUTH_REQUIRED;
+        case CONN_STATE_ERROR:        return ICON_TRAY_ATTENTION;
+        case CONN_STATE_RECONNECTING: return ICON_TRAY_VPN_ACQUIRING;
+        default:                      return ICON_TRAY_VPN_DISCONNECTED;
+    }
+}
+
+/**
+ * Create a sanitized AppIndicator ID from a config name
+ */
+static char* make_indicator_id(const char *config_name) {
+    char *id = g_strdup_printf("ovpn-%s", config_name);
+    for (char *p = id; *p; p++) {
+        if (!g_ascii_isalnum(*p) && *p != '-') {
+            *p = '-';
+        } else {
+            *p = g_ascii_tolower(*p);
+        }
+    }
+    return id;
+}
+
+/**
+ * Format the status label shown at the top of a connection's menu
+ */
+static void format_status_label(const char *name, ConnectionState state,
+                                 time_t connect_time, char *buffer, size_t size) {
     switch (state) {
         case CONN_STATE_DISCONNECTED:
-            return STATUS_SYMBOL_DISCONNECTED;
-        case CONN_STATE_CONNECTING:
-            return STATUS_SYMBOL_CONNECTING;
-        case CONN_STATE_RECONNECTING:
-            return STATUS_SYMBOL_RECONNECTING;
-        case CONN_STATE_CONNECTED:
-            return STATUS_SYMBOL_CONNECTED;
-        case CONN_STATE_PAUSED:
-            return STATUS_SYMBOL_PAUSED;
-        case CONN_STATE_AUTH_REQUIRED:
-            return STATUS_SYMBOL_AUTHENTICATING;
-        case CONN_STATE_ERROR:
-            return STATUS_SYMBOL_ERROR;
-        default:
-            return STATUS_SYMBOL_DISCONNECTED;
-    }
-}
-
-/**
- * Format connection label with status symbol and state info
- */
-static void format_connection_label(ConnectionInfo *conn, char *buffer, size_t size) {
-    const char *symbol = get_status_symbol(conn->state);
-
-    switch (conn->state) {
-        case CONN_STATE_DISCONNECTED:
-            snprintf(buffer, size, "%s %s", symbol, conn->config_name);
+            snprintf(buffer, size, "%s: Disconnected", name);
             break;
-
         case CONN_STATE_CONNECTING:
-            snprintf(buffer, size, "%s %s: Connecting...", symbol, conn->config_name);
+            snprintf(buffer, size, "%s: Connecting...", name);
             break;
-
         case CONN_STATE_CONNECTED: {
             time_t now = time(NULL);
-            time_t elapsed = now - conn->connect_time;
+            time_t elapsed = now - connect_time;
             char elapsed_str[32];
             format_elapsed_time(elapsed, elapsed_str, sizeof(elapsed_str));
-            snprintf(buffer, size, "%s %s: Connected · %s", symbol, conn->config_name, elapsed_str);
+            snprintf(buffer, size, "%s: Connected \xC2\xB7 %s", name, elapsed_str);
             break;
         }
+        case CONN_STATE_PAUSED:
+            snprintf(buffer, size, "%s: Paused", name);
+            break;
+        case CONN_STATE_AUTH_REQUIRED:
+            snprintf(buffer, size, "%s: Auth Required", name);
+            break;
+        case CONN_STATE_ERROR:
+            snprintf(buffer, size, "%s: Error", name);
+            break;
+        case CONN_STATE_RECONNECTING:
+            snprintf(buffer, size, "%s: Reconnecting...", name);
+            break;
+        default:
+            snprintf(buffer, size, "%s", name);
+            break;
+    }
+}
+
+/**
+ * Append a plain menu item with a callback to a menu
+ */
+static void add_action(GtkWidget *menu, const char *label,
+                        GCallback callback, gpointer data) {
+    GtkWidget *item = gtk_menu_item_new_with_label(label);
+    g_signal_connect(item, "activate", callback, data);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    gtk_widget_show(item);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Connection indicator lifecycle
+ * ────────────────────────────────────────────────────────────── */
+
+/**
+ * Rebuild a connection indicator's menu from scratch.
+ * This is the core fix: calling app_indicator_set_menu() with a new menu
+ * forces dbusmenu to re-serialize the entire tree, avoiding the property
+ * propagation issues that plague visibility/sensitivity changes.
+ */
+static void connection_indicator_rebuild_menu(ConnectionIndicator *ci) {
+    GtkWidget *new_menu = gtk_menu_new();
+
+    /* Status label (disabled) */
+    char label[256];
+    format_status_label(ci->config_name, ci->state, ci->connect_time,
+                        label, sizeof(label));
+    GtkWidget *status = gtk_menu_item_new_with_label(label);
+    gtk_widget_set_sensitive(status, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(new_menu), status);
+    gtk_widget_show(status);
+
+    /* Separator */
+    GtkWidget *sep = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(new_menu), sep);
+    gtk_widget_show(sep);
+
+    /* State-dependent actions */
+    switch (ci->state) {
+        case CONN_STATE_DISCONNECTED:
+        case CONN_STATE_ERROR:
+            add_action(new_menu, "Connect", G_CALLBACK(on_connect), ci);
+            break;
+
+        case CONN_STATE_CONNECTING:
+        case CONN_STATE_RECONNECTING:
+            add_action(new_menu, "Cancel", G_CALLBACK(on_cancel), ci);
+            break;
+
+        case CONN_STATE_CONNECTED:
+            add_action(new_menu, "Disconnect", G_CALLBACK(on_disconnect), ci);
+            add_action(new_menu, "Pause", G_CALLBACK(on_pause), ci);
+            break;
 
         case CONN_STATE_PAUSED:
-            snprintf(buffer, size, "%s %s: Paused", symbol, conn->config_name);
+            add_action(new_menu, "Resume", G_CALLBACK(on_resume), ci);
+            add_action(new_menu, "Disconnect", G_CALLBACK(on_disconnect), ci);
             break;
 
         case CONN_STATE_AUTH_REQUIRED:
-            snprintf(buffer, size, "%s %s: Auth Required", symbol, conn->config_name);
-            break;
-
-        case CONN_STATE_ERROR:
-            snprintf(buffer, size, "%s %s: Error", symbol, conn->config_name);
-            break;
-
-        case CONN_STATE_RECONNECTING:
-            snprintf(buffer, size, "%s %s: Reconnecting...", symbol, conn->config_name);
-            break;
-
-        default:
-            snprintf(buffer, size, "%s %s", symbol, conn->config_name);
+            add_action(new_menu, "Authenticate", G_CALLBACK(on_authenticate), ci);
+            add_action(new_menu, "Cancel", G_CALLBACK(on_cancel), ci);
             break;
     }
+
+    /* Swap menu — AppIndicator re-serializes on set_menu */
+    app_indicator_set_menu(ci->indicator, GTK_MENU(new_menu));
+    ci->menu = new_menu;
 }
 
 /**
- * Set action button states based on connection FSM state
+ * Create a new connection indicator with its own AppIndicator
  */
-static void set_action_states(ConnectionMenuItem *item) {
-    if (!item || !item->fsm) {
-        logger_error("set_action_states called with NULL item or FSM");
-        return;
-    }
+static ConnectionIndicator* connection_indicator_create(sd_bus *bus, ConnectionInfo *conn) {
+    ConnectionIndicator *ci = g_malloc0(sizeof(ConnectionIndicator));
 
-    /* Check for NULL widget pointers */
-    if (!item->connect_item || !item->disconnect_item || !item->pause_item ||
-        !item->resume_item || !item->auth_item) {
-        logger_error("set_action_states: NULL widget pointers for config=%s (connect=%p, disconnect=%p, pause=%p, resume=%p, auth=%p)",
-                     item->config_name ? item->config_name : "unknown",
-                     item->connect_item, item->disconnect_item, item->pause_item,
-                     item->resume_item, item->auth_item);
-        return;
-    }
+    ci->config_path = g_strdup(conn->config_path);
+    ci->config_name = g_strdup(conn->config_name);
+    ci->session_path = conn->session_path ? g_strdup(conn->session_path) : NULL;
+    ci->state = conn->state;
+    ci->connect_time = conn->connect_time;
+    ci->bus = bus;
 
-    /* Get button states from FSM */
-    ConnectionButtonStates button_states = connection_fsm_get_button_states(item->fsm);
-    ConnectionState current_state = connection_fsm_get_state(item->fsm);
+    /* Create unique AppIndicator */
+    char *id = make_indicator_id(conn->config_name);
+    const char *icon = get_indicator_icon(conn->state);
 
-    /* Log at INFO level for visibility at verbosity 2+ */
-    if (logger_get_verbosity() >= 2) {
-        logger_info("set_action_states: config=%s, FSM state=%s, buttons: connect=%d, disconnect=%d, pause=%d, resume=%d, auth=%d",
-                     item->config_name ? item->config_name : "unknown",
-                     connection_fsm_state_name(current_state),
-                     button_states.connect_enabled, button_states.disconnect_enabled,
-                     button_states.pause_enabled, button_states.resume_enabled,
-                     button_states.auth_enabled);
-    }
+    ci->indicator = app_indicator_new(id, icon,
+                                       APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+    g_free(id);
 
-    /* Apply states to widgets */
-    gtk_widget_set_sensitive(item->connect_item, button_states.connect_enabled);
-    gtk_widget_set_sensitive(item->disconnect_item, button_states.disconnect_enabled);
-    gtk_widget_set_sensitive(item->pause_item, button_states.pause_enabled);
-    gtk_widget_set_sensitive(item->resume_item, button_states.resume_enabled);
-    gtk_widget_set_sensitive(item->auth_item, button_states.auth_enabled);
-
-    if (logger_get_verbosity() >= 3) {
-        logger_debug("  Applied sensitivity - connect is now: %s, disconnect is now: %s",
-                     gtk_widget_get_sensitive(item->connect_item) ? "SENSITIVE" : "INSENSITIVE",
-                     gtk_widget_get_sensitive(item->disconnect_item) ? "SENSITIVE" : "INSENSITIVE");
-    }
-}
-
-/**
- * Free a ConnectionMenuItem
- */
-static void free_connection_menu_item(ConnectionMenuItem *item) {
-    if (!item) {
-        return;
-    }
-
-    /* Destroy FSM */
-    if (item->fsm) {
-        connection_fsm_destroy(item->fsm);
-        item->fsm = NULL;
-    }
-
-    /* Free callback data */
-    if (item->callback_data) {
-        g_free(item->callback_data->config_path);
-        g_free(item->callback_data->session_path);
-        g_free(item->callback_data);
-    }
-
-    /* Free tracked strings */
-    g_free(item->config_path);
-    g_free(item->session_path);
-    g_free(item->config_name);
-
-    /* GTK widgets are freed automatically when removed from menu */
-
-    g_free(item);
-}
-
-/**
- * Create a new connection menu item
- */
-static ConnectionMenuItem* create_connection_menu_item(TrayIcon *tray, sd_bus *bus, ConnectionInfo *conn) {
-    ConnectionMenuItem *item = g_malloc0(sizeof(ConnectionMenuItem));
-
-    /* Store connection info */
-    item->config_path = g_strdup(conn->config_path);
-    item->session_path = conn->session_path ? g_strdup(conn->session_path) : NULL;
-    item->config_name = g_strdup(conn->config_name);
-    item->state = conn->state;
-    item->connect_time = conn->connect_time;
-
-    /* Create FSM for this connection */
-    item->fsm = connection_fsm_create(conn->config_name);
-    if (!item->fsm) {
-        logger_error("Failed to create FSM for connection '%s'", conn->config_name);
-        g_free(item->config_path);
-        g_free(item->session_path);
-        g_free(item->config_name);
-        g_free(item);
+    if (!ci->indicator) {
+        logger_error("Failed to create indicator for '%s'", conn->config_name);
+        g_free(ci->config_path);
+        g_free(ci->config_name);
+        g_free(ci->session_path);
+        g_free(ci);
         return NULL;
     }
 
-    /* Initialize FSM state based on current connection state */
-    ConnectionFsmEvent initial_event;
-    switch (conn->state) {
-        case CONN_STATE_CONNECTING:
-            initial_event = FSM_EVENT_SESSION_CONNECTING;
-            connection_fsm_process_event(item->fsm, initial_event);
-            break;
-        case CONN_STATE_CONNECTED:
-            initial_event = FSM_EVENT_SESSION_CONNECTED;
-            connection_fsm_process_event(item->fsm, initial_event);
-            break;
-        case CONN_STATE_PAUSED:
-            initial_event = FSM_EVENT_SESSION_PAUSED;
-            connection_fsm_process_event(item->fsm, initial_event);
-            break;
-        case CONN_STATE_AUTH_REQUIRED:
-            initial_event = FSM_EVENT_SESSION_AUTH_REQUIRED;
-            connection_fsm_process_event(item->fsm, initial_event);
-            break;
-        case CONN_STATE_ERROR:
-            initial_event = FSM_EVENT_SESSION_ERROR;
-            connection_fsm_process_event(item->fsm, initial_event);
-            break;
-        case CONN_STATE_RECONNECTING:
-            initial_event = FSM_EVENT_SESSION_RECONNECTING;
-            connection_fsm_process_event(item->fsm, initial_event);
-            break;
-        case CONN_STATE_DISCONNECTED:
-        default:
-            /* Already in DISCONNECTED state - no event needed */
-            break;
-    }
+    app_indicator_set_status(ci->indicator, APP_INDICATOR_STATUS_ACTIVE);
+    app_indicator_set_title(ci->indicator, conn->config_name);
 
-    /* Format initial label (includes status symbol) */
-    char label[256];
-    format_connection_label(conn, label, sizeof(label));
+    /* Build initial menu */
+    connection_indicator_rebuild_menu(ci);
 
-    /* Create parent menu item (no icon - status is in label text) */
-    item->parent_item = gtk_menu_item_new_with_label(label);
+    logger_info("Created tray indicator for '%s' (state=%s)",
+                conn->config_name, connection_fsm_state_name(conn->state));
 
-    /* Create submenu */
-    item->submenu = gtk_menu_new();
-
-    /* Create callback data */
-    item->callback_data = g_malloc0(sizeof(ConnectionCallbackData));
-    item->callback_data->bus = bus;
-    item->callback_data->config_path = g_strdup(conn->config_path);
-    item->callback_data->session_path = conn->session_path ? g_strdup(conn->session_path) : NULL;
-
-    /* Create all action buttons (always present) */
-    item->connect_item = widget_create_menu_item("Connect", ICON_CONNECT, NULL);
-    g_signal_connect(item->connect_item, "activate", G_CALLBACK(connect_config_callback), item->callback_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->connect_item);
-    gtk_widget_show(item->connect_item);
-
-    item->disconnect_item = widget_create_menu_item("Disconnect", ICON_DISCONNECT, NULL);
-    g_signal_connect(item->disconnect_item, "activate", G_CALLBACK(disconnect_callback), item->callback_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->disconnect_item);
-    gtk_widget_show(item->disconnect_item);
-
-    item->pause_item = widget_create_menu_item("Pause", ICON_PAUSE, NULL);
-    g_signal_connect(item->pause_item, "activate", G_CALLBACK(pause_callback), item->callback_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->pause_item);
-    gtk_widget_show(item->pause_item);
-
-    item->resume_item = widget_create_menu_item("Resume", ICON_RESUME, NULL);
-    g_signal_connect(item->resume_item, "activate", G_CALLBACK(resume_callback), item->callback_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->resume_item);
-    gtk_widget_show(item->resume_item);
-
-    item->auth_item = widget_create_menu_item("Authenticate", ICON_AUTHENTICATE, NULL);
-    g_signal_connect(item->auth_item, "activate", G_CALLBACK(authenticate_callback), item->callback_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->auth_item);
-    gtk_widget_show(item->auth_item);
-
-    /* Attach submenu to parent */
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item->parent_item), item->submenu);
-
-    /* Set initial action states from FSM */
-    set_action_states(item);
-
-    /* Insert at alphabetically sorted position before static section */
-    GList *children = gtk_container_get_children(GTK_CONTAINER(tray->menu));
-    int insert_pos = g_list_index(children, static_section_sep);
-    if (insert_pos >= 0) {
-        gtk_menu_shell_insert(GTK_MENU_SHELL(tray->menu), item->parent_item, insert_pos);
-    } else {
-        gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), item->parent_item);
-    }
-    g_list_free(children);
-
-    gtk_widget_show(item->parent_item);
-
-    return item;
+    return ci;
 }
 
 /**
- * Map connection state to FSM event
- * This determines which event to send to the FSM based on observed state
+ * Destroy a connection indicator
  */
-static ConnectionFsmEvent map_state_to_event(ConnectionState new_state) {
-    switch (new_state) {
-        case CONN_STATE_CONNECTING:
-            return FSM_EVENT_SESSION_CONNECTING;
-        case CONN_STATE_CONNECTED:
-            return FSM_EVENT_SESSION_CONNECTED;
-        case CONN_STATE_PAUSED:
-            return FSM_EVENT_SESSION_PAUSED;
-        case CONN_STATE_AUTH_REQUIRED:
-            return FSM_EVENT_SESSION_AUTH_REQUIRED;
-        case CONN_STATE_ERROR:
-            return FSM_EVENT_SESSION_ERROR;
-        case CONN_STATE_RECONNECTING:
-            return FSM_EVENT_SESSION_RECONNECTING;
-        case CONN_STATE_DISCONNECTED:
-        default:
-            return FSM_EVENT_SESSION_DISCONNECTED;
-    }
-}
-
-/**
- * Update an existing connection menu item
- */
-static void update_connection_menu_item(ConnectionMenuItem *item, ConnectionInfo *conn, sd_bus *bus) {
-    if (!item || !conn || !item->fsm) {
-        logger_error("update_connection_menu_item called with NULL item, conn, or FSM");
+static void connection_indicator_free(ConnectionIndicator *ci) {
+    if (!ci) {
         return;
     }
 
-    ConnectionState old_state = item->state;
-    ConnectionState new_state = conn->state;
+    logger_info("Destroying tray indicator for '%s'", ci->config_name);
 
-    /* Process state change through FSM */
-    if (old_state != new_state) {
-        logger_info("Connection '%s' state: %s -> %s, session_path: %s -> %s",
-                    conn->config_name ? conn->config_name : "unknown",
-                    connection_fsm_state_name(old_state),
-                    connection_fsm_state_name(new_state),
-                    item->session_path ? item->session_path : "(null)",
-                    conn->session_path ? conn->session_path : "(null)");
+    if (ci->indicator) {
+        app_indicator_set_status(ci->indicator, APP_INDICATOR_STATUS_PASSIVE);
+        g_object_unref(ci->indicator);
+    }
 
-        /* Determine FSM event from new state */
-        ConnectionFsmEvent event = map_state_to_event(new_state);
+    g_free(ci->config_path);
+    g_free(ci->config_name);
+    g_free(ci->session_path);
+    g_free(ci);
+}
 
-        /* Process event through FSM */
-        ConnectionState fsm_result = connection_fsm_process_event(item->fsm, event);
+/**
+ * Update a connection indicator with new state from D-Bus
+ */
+static void connection_indicator_update(ConnectionIndicator *ci, ConnectionInfo *conn) {
+    if (!ci || !conn) {
+        return;
+    }
 
-        /* Update our tracked state to match FSM state */
-        item->state = fsm_result;
-    } else if (logger_get_verbosity() >= 2) {
-        logger_info("Connection '%s' state: %s (no change), session_path: %s -> %s",
-                    conn->config_name ? conn->config_name : "unknown",
-                    connection_fsm_state_name(old_state),
-                    item->session_path ? item->session_path : "(null)",
-                    conn->session_path ? conn->session_path : "(null)");
+    gboolean changed = FALSE;
+
+    /* Check for state change */
+    if (ci->state != conn->state) {
+        logger_info("Connection '%s' state: %s -> %s",
+                    ci->config_name,
+                    connection_fsm_state_name(ci->state),
+                    connection_fsm_state_name(conn->state));
+        ci->state = conn->state;
+        changed = TRUE;
+
+        /* Update icon */
+        app_indicator_set_icon(ci->indicator, get_indicator_icon(ci->state));
     }
 
     /* Update connect time */
-    item->connect_time = conn->connect_time;
+    ci->connect_time = conn->connect_time;
 
     /* Update session path if changed */
-    if (item->session_path != conn->session_path) {
-        g_free(item->session_path);
-        item->session_path = conn->session_path ? g_strdup(conn->session_path) : NULL;
-
-        /* Update callback data */
-        g_free(item->callback_data->session_path);
-        item->callback_data->session_path = conn->session_path ? g_strdup(conn->session_path) : NULL;
+    if (g_strcmp0(ci->session_path, conn->session_path) != 0) {
+        g_free(ci->session_path);
+        ci->session_path = conn->session_path ? g_strdup(conn->session_path) : NULL;
+        changed = TRUE;
     }
 
-    /* Update label (includes status symbol) */
-    char label[256];
-    format_connection_label(conn, label, sizeof(label));
-    gtk_menu_item_set_label(GTK_MENU_ITEM(item->parent_item), label);
+    /* Rebuild menu if anything changed */
+    if (changed) {
+        connection_indicator_rebuild_menu(ci);
+    }
 
-    /* Update action states from FSM */
-    set_action_states(item);
-
-    /* Auto-launch browser for authentication if required */
-    if (conn->state == CONN_STATE_AUTH_REQUIRED && conn->session_path && bus) {
+    /* Auto-launch browser for authentication */
+    if (conn->state == CONN_STATE_AUTH_REQUIRED && conn->session_path && ci->bus) {
         if (!auth_launched) {
             auth_launched = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
         }
         if (!g_hash_table_contains(auth_launched, conn->session_path)) {
-            launch_auth_browser(bus, conn->session_path);
-            g_hash_table_insert(auth_launched, g_strdup(conn->session_path), GINT_TO_POINTER(1));
+            launch_auth_browser(ci->bus, conn->session_path);
+            g_hash_table_insert(auth_launched, g_strdup(conn->session_path),
+                                GINT_TO_POINTER(1));
         }
     }
-
-    /* Show parent item */
-    gtk_widget_show(item->parent_item);
 }
 
-/* === END NEW CONNECTION FUNCTIONS === */
+/* ──────────────────────────────────────────────────────────────
+ * Connection action callbacks
+ * ────────────────────────────────────────────────────────────── */
 
 /**
- * Create a new session menu item with all sub-items
+ * Connect to a VPN configuration
  */
-static SessionMenuItem* create_session_menu_item(TrayIcon *tray, sd_bus *bus, VpnSession *session) {
-    SessionMenuItem *item = g_malloc0(sizeof(SessionMenuItem));
-
-    /* Create main session menu item (parent) */
-    item->parent_item = widget_create_session_item(session, TRUE);
-
-    /* Create submenu */
-    item->submenu = gtk_menu_new();
-
-    /* Add device name to submenu */
-    char device_text[128];
-    snprintf(device_text, sizeof(device_text), "%s",
-            session->device_name && session->device_name[0] ? session->device_name : "no device");
-    item->device_item = widget_create_metadata_item(device_text);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->device_item);
-
-    /* Add separator */
-    GtkWidget *sep = gtk_separator_menu_item_new();
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), sep);
-    gtk_widget_show(sep);
-
-    /* Create all possible action buttons (we'll show/hide based on state) */
-
-    /* Disconnect button - always present */
-    item->disconnect_data = g_malloc(sizeof(SessionCallbackData));
-    item->disconnect_data->bus = bus;
-    item->disconnect_data->session_path = g_strdup(session->session_path);
-    item->disconnect_item = widget_create_menu_item("Disconnect", ICON_DISCONNECT, NULL);
-    g_signal_connect(item->disconnect_item, "activate",
-                   G_CALLBACK(disconnect_callback), item->disconnect_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->disconnect_item);
-
-    /* Pause button - show when connected */
-    item->pause_data = g_malloc(sizeof(SessionCallbackData));
-    item->pause_data->bus = bus;
-    item->pause_data->session_path = g_strdup(session->session_path);
-    item->pause_item = widget_create_menu_item("Pause", ICON_PAUSE, NULL);
-    g_signal_connect(item->pause_item, "activate",
-                   G_CALLBACK(pause_callback), item->pause_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->pause_item);
-
-    /* Resume button - show when paused */
-    item->resume_data = g_malloc(sizeof(SessionCallbackData));
-    item->resume_data->bus = bus;
-    item->resume_data->session_path = g_strdup(session->session_path);
-    item->resume_item = widget_create_menu_item("Resume", ICON_RESUME, NULL);
-    g_signal_connect(item->resume_item, "activate",
-                   G_CALLBACK(resume_callback), item->resume_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->resume_item);
-
-    /* Authenticate button - show when auth required */
-    item->auth_data = g_malloc(sizeof(SessionCallbackData));
-    item->auth_data->bus = bus;
-    item->auth_data->session_path = g_strdup(session->session_path);
-    item->auth_item = widget_create_menu_item("Authenticate", ICON_AUTHENTICATE, NULL);
-    g_signal_connect(item->auth_item, "activate",
-                   G_CALLBACK(authenticate_callback), item->auth_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->auth_item);
-
-    /* Attach submenu to parent */
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item->parent_item), item->submenu);
-
-    /* Add parent to main menu */
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), item->parent_item);
-
-    return item;
-}
-
-/**
- * Update an existing session menu item based on session state
- */
-static void update_session_menu_item(SessionMenuItem *item, VpnSession *session, sd_bus *bus) {
-    if (!item || !session) {
+static void on_connect(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    ConnectionIndicator *ci = (ConnectionIndicator *)data;
+    if (!ci || !ci->bus || !ci->config_path) {
         return;
     }
 
-    /* Update parent label */
-    if (session->state == SESSION_STATE_CONNECTED) {
-        time_t start_time = get_session_start_time(session->session_path, session->session_created);
-        time_t now = time(NULL);
-        time_t elapsed = now - start_time;
+    logger_info("Connecting: %s", ci->config_name);
 
-        char elapsed_str[32];
-        format_elapsed_time(elapsed, elapsed_str, sizeof(elapsed_str));
-
-        char label_text[256];
-        snprintf(label_text, sizeof(label_text), "%s: Connected · %s",
-                session->config_name ? session->config_name : "Unknown",
-                elapsed_str);
-        gtk_menu_item_set_label(GTK_MENU_ITEM(item->parent_item), label_text);
+    char *session_path = NULL;
+    int r = session_start(ci->bus, ci->config_path, &session_path);
+    if (r < 0) {
+        logger_error("Failed to start VPN session for '%s'", ci->config_name);
     } else {
-        /* For other states, use widget_create_session_item logic */
-        const char *state_text = "";
-        switch (session->state) {
-            case SESSION_STATE_CONNECTING:
-                state_text = ": Connecting...";
-                break;
-            case SESSION_STATE_RECONNECTING:
-                state_text = ": Reconnecting...";
-                break;
-            case SESSION_STATE_PAUSED:
-                state_text = ": Paused";
-                break;
-            case SESSION_STATE_AUTH_REQUIRED:
-                state_text = ": Auth Required";
-                break;
-            case SESSION_STATE_ERROR:
-                state_text = ": Error";
-                break;
-            case SESSION_STATE_DISCONNECTED:
-                state_text = ": Disconnected";
-                break;
-            default:
-                state_text = "";
-                break;
-        }
-
-        char label_text[256];
-        snprintf(label_text, sizeof(label_text), "%s%s",
-                session->config_name ? session->config_name : "Unknown",
-                state_text);
-        gtk_menu_item_set_label(GTK_MENU_ITEM(item->parent_item), label_text);
+        logger_info("Started VPN session: %s", session_path);
+        g_free(session_path);
     }
-
-    /* Update device name */
-    if (item->device_item) {
-        char device_text[128];
-        snprintf(device_text, sizeof(device_text), "%s",
-                session->device_name && session->device_name[0] ? session->device_name : "no device");
-        gtk_menu_item_set_label(GTK_MENU_ITEM(item->device_item), device_text);
-    }
-
-    /* Update button visibility based on state */
-    if (item->disconnect_item) {
-        gtk_widget_show(item->disconnect_item);  /* Always show disconnect */
-    }
-
-    if (item->pause_item) {
-        if (session->state == SESSION_STATE_CONNECTED) {
-            gtk_widget_show(item->pause_item);
-        } else {
-            gtk_widget_hide(item->pause_item);
-        }
-    }
-
-    if (item->resume_item) {
-        if (session->state == SESSION_STATE_PAUSED) {
-            gtk_widget_show(item->resume_item);
-        } else {
-            gtk_widget_hide(item->resume_item);
-        }
-    }
-
-    if (item->auth_item) {
-        if (session->state == SESSION_STATE_AUTH_REQUIRED) {
-            gtk_widget_show(item->auth_item);
-
-            /* Auto-launch browser for authentication if required */
-            if (!auth_launched) {
-                auth_launched = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-            }
-            if (!g_hash_table_contains(auth_launched, session->session_path)) {
-                launch_auth_browser(bus, session->session_path);
-                g_hash_table_insert(auth_launched, g_strdup(session->session_path), GINT_TO_POINTER(1));
-            }
-        } else {
-            gtk_widget_hide(item->auth_item);
-        }
-    }
-
-    /* Show parent item */
-    gtk_widget_show_all(item->parent_item);
 }
 
 /**
- * Create a new config menu item
+ * Disconnect with confirmation dialog
  */
-static ConfigMenuItem* create_config_menu_item(TrayIcon *tray, sd_bus *bus, VpnConfig *config, bool in_use) {
-    ConfigMenuItem *item = g_malloc0(sizeof(ConfigMenuItem));
-
-    /* Create parent item */
-    item->parent_item = widget_create_config_item(
-        config->config_name ? config->config_name : "Unknown",
-        in_use);
-
-    /* Create submenu */
-    item->submenu = gtk_menu_new();
-
-    /* Create status item (for in_use state) */
-    item->status_item = gtk_menu_item_new_with_label("(In use)");
-    gtk_widget_set_sensitive(item->status_item, FALSE);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->status_item);
-
-    /* Create connect button */
-    item->connect_data = g_malloc(sizeof(ConfigCallbackData));
-    item->connect_data->bus = bus;
-    item->connect_data->config_path = g_strdup(config->config_path);
-    item->connect_item = widget_create_menu_item("Connect", ICON_CONNECT, NULL);
-    g_signal_connect(item->connect_item, "activate",
-                   G_CALLBACK(connect_config_callback), item->connect_data);
-    gtk_menu_shell_append(GTK_MENU_SHELL(item->submenu), item->connect_item);
-
-    /* Attach submenu to parent */
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item->parent_item), item->submenu);
-
-    /* Add parent to main menu - insert before static section separator */
-    GList *children = gtk_container_get_children(GTK_CONTAINER(tray->menu));
-    int insert_pos = g_list_index(children, static_section_sep);
-    if (insert_pos >= 0) {
-        gtk_menu_shell_insert(GTK_MENU_SHELL(tray->menu), item->parent_item, insert_pos);
-    } else {
-        /* Fallback: append if separator not found yet */
-        gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), item->parent_item);
-    }
-    g_list_free(children);
-
-    return item;
-}
-
-/**
- * Update an existing config menu item
- */
-static void update_config_menu_item(ConfigMenuItem *item, VpnConfig *config, bool in_use) {
-    if (!item || !config) {
+static void on_disconnect(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    ConnectionIndicator *ci = (ConnectionIndicator *)data;
+    if (!ci || !ci->bus || !ci->session_path) {
         return;
     }
 
-    /* Update visibility based on in_use state */
-    if (in_use) {
-        if (item->status_item) {
-            gtk_widget_show(item->status_item);
-        }
-        if (item->connect_item) {
-            gtk_widget_hide(item->connect_item);
-        }
-    } else {
-        if (item->status_item) {
-            gtk_widget_hide(item->status_item);
-        }
-        if (item->connect_item) {
-            gtk_widget_show(item->connect_item);
+    /* Show confirmation dialog */
+    GtkWidget *dialog = gtk_message_dialog_new(
+        NULL,
+        GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION,
+        GTK_BUTTONS_NONE,
+        "Disconnect from %s?",
+        ci->config_name
+    );
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Disconnect", GTK_RESPONSE_ACCEPT);
+
+    int response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+
+    if (response == GTK_RESPONSE_ACCEPT) {
+        logger_info("Disconnecting: %s", ci->config_name);
+        int r = session_disconnect(ci->bus, ci->session_path);
+        if (r < 0) {
+            logger_error("Failed to disconnect session");
+        } else {
+            remove_session_timing(ci->session_path);
         }
     }
-
-    /* Show parent item */
-    gtk_widget_show_all(item->parent_item);
 }
 
 /**
- * Import config callback
+ * Pause a connected VPN session
+ */
+static void on_pause(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    ConnectionIndicator *ci = (ConnectionIndicator *)data;
+    if (!ci || !ci->bus || !ci->session_path) {
+        return;
+    }
+
+    logger_info("Pausing: %s", ci->config_name);
+    int r = session_pause(ci->bus, ci->session_path, "User requested");
+    if (r < 0) {
+        logger_error("Failed to pause session");
+    }
+}
+
+/**
+ * Resume a paused VPN session
+ */
+static void on_resume(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    ConnectionIndicator *ci = (ConnectionIndicator *)data;
+    if (!ci || !ci->bus || !ci->session_path) {
+        return;
+    }
+
+    logger_info("Resuming: %s", ci->config_name);
+    int r = session_resume(ci->bus, ci->session_path);
+    if (r < 0) {
+        logger_error("Failed to resume session");
+    }
+}
+
+/**
+ * Cancel a connecting/reconnecting session
+ */
+static void on_cancel(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    ConnectionIndicator *ci = (ConnectionIndicator *)data;
+    if (!ci || !ci->bus || !ci->session_path) {
+        return;
+    }
+
+    logger_info("Cancelling: %s", ci->config_name);
+    int r = session_disconnect(ci->bus, ci->session_path);
+    if (r < 0) {
+        logger_error("Failed to cancel session");
+    } else {
+        remove_session_timing(ci->session_path);
+    }
+}
+
+/**
+ * Launch browser for OAuth authentication
+ */
+static void on_authenticate(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    ConnectionIndicator *ci = (ConnectionIndicator *)data;
+    if (!ci || !ci->bus || !ci->session_path) {
+        return;
+    }
+
+    launch_auth_browser(ci->bus, ci->session_path);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * App menu callbacks
+ * ────────────────────────────────────────────────────────────── */
+
+/**
+ * Quit the application
+ */
+static void quit_callback(GtkMenuItem *item, gpointer user_data) {
+    (void)item;
+    (void)user_data;
+
+    logger_info("Quit menu item clicked");
+
+    extern GApplication *app;
+    if (app) {
+        g_application_quit(app);
+    }
+}
+
+/**
+ * Show the dashboard window
+ */
+static void show_dashboard_callback(GtkMenuItem *item, gpointer user_data) {
+    (void)item;
+    (void)user_data;
+
+    logger_info("Show Dashboard menu item clicked");
+
+    if (dashboard) {
+        dashboard_show(dashboard);
+    }
+}
+
+/**
+ * Import a VPN configuration file
  */
 static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     (void)item;
@@ -1328,8 +773,7 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     /* Show file chooser */
     char *file_path = file_chooser_select_ovpn("Import OpenVPN Configuration");
     if (!file_path) {
-        /* User cancelled */
-        return;
+        return;  /* User cancelled */
     }
 
     logger_info("Selected file: %s", file_path);
@@ -1368,7 +812,6 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     g_free(basename);
 
     if (!config_name) {
-        /* User cancelled */
         logger_info("Import cancelled by user");
         g_free(contents);
         g_free(file_path);
@@ -1382,341 +825,337 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     if (r < 0) {
         logger_error("Failed to import configuration: %s", config_name);
         char msg[256];
-        snprintf(msg, sizeof(msg), "Failed to import configuration '%s'.\n\nCheck if the configuration already exists.", config_name);
+        snprintf(msg, sizeof(msg),
+                 "Failed to import configuration '%s'.\n\n"
+                 "Check if the configuration already exists.", config_name);
         dialog_show_error("Import Error", msg);
     } else {
-        logger_info("Successfully imported persistent configuration: %s -> %s", config_name, config_path);
+        logger_info("Successfully imported persistent configuration: %s -> %s",
+                     config_name, config_path);
         char msg[256];
-        snprintf(msg, sizeof(msg), "Configuration '%s' imported successfully.", config_name);
+        snprintf(msg, sizeof(msg), "Configuration '%s' imported successfully.",
+                 config_name);
         dialog_show_info("Import Successful", msg);
         g_free(config_path);
     }
 
-    /* Cleanup */
     g_free(config_name);
     g_free(contents);
     g_free(file_path);
 }
 
-/**
- * Connect to config callback
- */
-static void connect_config_callback(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    /* NEW: Support both old ConfigCallbackData and new ConnectionCallbackData */
-    ConnectionCallbackData *data = (ConnectionCallbackData *)user_data;
+/* ──────────────────────────────────────────────────────────────
+ * App menu building
+ * ────────────────────────────────────────────────────────────── */
 
-    if (!data || !data->bus || !data->config_path) {
+/**
+ * Build the app indicator's static menu (Dashboard, Import, Settings, Quit)
+ */
+static void build_app_menu(TrayIcon *tray) {
+    if (tray->app_menu_built) {
         return;
     }
 
-    logger_info("Connecting to config: %s", data->config_path);
+    GtkWidget *menu = gtk_menu_new();
 
-    char *session_path = NULL;
-    int r = session_start(data->bus, data->config_path, &session_path);
-    if (r < 0) {
-        logger_error("Failed to start VPN session");
-    } else {
-        logger_info("Started VPN session: %s", session_path);
-        g_free(session_path);
-    }
-}
+    /* Header (disabled) */
+    GtkWidget *header = gtk_menu_item_new_with_label("OpenVPN Manager");
+    gtk_widget_set_sensitive(header, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), header);
+    gtk_widget_show(header);
 
-/**
- * Initialize static menu items (one-time setup)
- */
-static void init_static_menu_items(TrayIcon *tray, sd_bus *bus) {
-    if (static_section_sep) {
-        return;  /* Already initialized */
-    }
+    /* Separator */
+    GtkWidget *sep1 = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), sep1);
+    gtk_widget_show(sep1);
 
-    /* Create static separator */
-    static_section_sep = gtk_separator_menu_item_new();
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), static_section_sep);
-    gtk_widget_show(static_section_sep);
+    /* Show Dashboard */
+    GtkWidget *dash = gtk_menu_item_new_with_label("Show Dashboard");
+    g_signal_connect(dash, "activate", G_CALLBACK(show_dashboard_callback), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), dash);
+    gtk_widget_show(dash);
 
-    /* Create "Show Dashboard" menu item */
-    dashboard_item = widget_create_menu_item("Show Dashboard", ICON_DASHBOARD, NULL);
-    g_signal_connect(dashboard_item, "activate", G_CALLBACK(show_dashboard_callback), NULL);
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), dashboard_item);
-    gtk_widget_show(dashboard_item);
-
-    /* Create "Import Config..." menu item */
-    import_item = widget_create_menu_item("Import Config...", ICON_IMPORT, NULL);
-    g_signal_connect(import_item, "activate", G_CALLBACK(import_config_callback), bus);
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), import_item);
+    /* Import Config... */
+    GtkWidget *import_item = gtk_menu_item_new_with_label("Import Config...");
+    g_signal_connect(import_item, "activate", G_CALLBACK(import_config_callback), tray->bus);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), import_item);
     gtk_widget_show(import_item);
 
-    /* Create "Settings" menu item (placeholder) */
-    settings_item = widget_create_menu_item("Settings", ICON_SETTINGS, NULL);
-    gtk_widget_set_sensitive(settings_item, FALSE); /* Not implemented yet */
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), settings_item);
-    gtk_widget_show(settings_item);
+    /* Settings (not implemented) */
+    GtkWidget *settings = gtk_menu_item_new_with_label("Settings");
+    gtk_widget_set_sensitive(settings, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), settings);
+    gtk_widget_show(settings);
 
-    /* Create final separator */
-    GtkWidget *separator2 = gtk_separator_menu_item_new();
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), separator2);
-    gtk_widget_show(separator2);
+    /* Separator */
+    GtkWidget *sep2 = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), sep2);
+    gtk_widget_show(sep2);
 
-    /* Create "Quit" menu item */
-    quit_item = widget_create_menu_item("Quit", ICON_QUIT, NULL);
-    g_signal_connect(quit_item, "activate", G_CALLBACK(quit_callback), tray);
-    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), quit_item);
-    gtk_widget_show(quit_item);
+    /* Quit */
+    GtkWidget *quit = gtk_menu_item_new_with_label("Quit");
+    g_signal_connect(quit, "activate", G_CALLBACK(quit_callback), tray);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), quit);
+    gtk_widget_show(quit);
+
+    app_indicator_set_menu(tray->indicator, GTK_MENU(menu));
+    tray->menu = menu;
+    tray->app_menu_built = TRUE;
 }
 
+/* ──────────────────────────────────────────────────────────────
+ * Public API
+ * ────────────────────────────────────────────────────────────── */
+
 /**
- * Update only the timer labels for connected sessions (efficient, no rebuild)
+ * Initialize the system tray icon (app indicator only)
  */
-void tray_icon_update_timers(TrayIcon *tray, sd_bus *bus) {
-    (void)tray;
-
-    if (!bus || !timer_labels) {
-        return;
+TrayIcon* tray_icon_init(const char *tooltip) {
+    /* Initialize GTK if not already initialized */
+    if (!gtk_init_check(NULL, NULL)) {
+        logger_error("Failed to initialize GTK");
+        return NULL;
     }
 
-    /* Get current sessions */
-    VpnSession **sessions = NULL;
-    unsigned int count = 0;
+    TrayIcon *tray = g_malloc0(sizeof(TrayIcon));
 
-    int r = session_list(bus, &sessions, &count);
-    if (r < 0) {
-        return;
+    /* Create app indicator (gear icon) */
+    tray->indicator = app_indicator_new(
+        "ovpn-manager",
+        ICON_TRAY_APP,
+        APP_INDICATOR_CATEGORY_APPLICATION_STATUS
+    );
+
+    if (!tray->indicator) {
+        logger_error("Failed to create app indicator");
+        g_free(tray);
+        return NULL;
     }
 
-    /* Update timer labels for connected sessions */
-    for (unsigned int i = 0; i < count; i++) {
-        VpnSession *session = sessions[i];
+    app_indicator_set_status(tray->indicator, APP_INDICATOR_STATUS_ACTIVE);
 
-        if (session->state == SESSION_STATE_CONNECTED) {
-            GtkWidget *menu_item = g_hash_table_lookup(timer_labels, session->session_path);
-            if (menu_item && GTK_IS_MENU_ITEM(menu_item)) {
-                time_t start_time = get_session_start_time(session->session_path, session->session_created);
-                time_t now = time(NULL);
-                time_t elapsed = now - start_time;
-
-                char elapsed_str[32];
-                format_elapsed_time(elapsed, elapsed_str, sizeof(elapsed_str));
-
-                /* Update parent menu item label with status symbol: "● config_name: Connected · 2m" */
-                char label_text[256];
-                snprintf(label_text, sizeof(label_text), "%s %s: Connected · %s",
-                        STATUS_SYMBOL_CONNECTED,
-                        session->config_name ? session->config_name : "Unknown",
-                        elapsed_str);
-
-                gtk_menu_item_set_label(GTK_MENU_ITEM(menu_item), label_text);
-            }
-        }
+    if (tooltip) {
+        tray->tooltip = g_strdup(tooltip);
+        app_indicator_set_title(tray->indicator, tooltip);
     }
 
-    session_list_free(sessions, count);
+    /* Placeholder menu (AppIndicator requires a menu to show) */
+    tray->menu = gtk_menu_new();
+    GtkWidget *placeholder = gtk_menu_item_new_with_label("Loading...");
+    gtk_widget_set_sensitive(placeholder, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(tray->menu), placeholder);
+    gtk_widget_show(placeholder);
+    app_indicator_set_menu(tray->indicator, GTK_MENU(tray->menu));
+
+    /* Initialize connection hash table */
+    tray->connections = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free,
+        (GDestroyNotify)connection_indicator_free
+    );
+
+    tray->app_menu_built = FALSE;
+    tray->bus = NULL;
+
+    logger_info("System tray icon initialized");
+
+    return tray;
 }
+
 /**
- * Update tray menu with active VPN sessions
+ * Update the tray icon tooltip
+ */
+void tray_icon_set_tooltip(TrayIcon *tray, const char *tooltip) {
+    if (!tray || !tooltip) {
+        return;
+    }
+
+    g_free(tray->tooltip);
+    tray->tooltip = g_strdup(tooltip);
+    app_indicator_set_title(tray->indicator, tooltip);
+}
+
+/**
+ * Process pending GTK events (called by GLib timer)
+ */
+int tray_icon_run(TrayIcon *tray) {
+    if (!tray) {
+        return -1;
+    }
+
+    while (gtk_events_pending()) {
+        gtk_main_iteration_do(FALSE);
+    }
+
+    return 0;
+}
+
+/**
+ * Update tray with active VPN sessions.
+ * Creates/updates/removes per-connection AppIndicators.
  */
 void tray_icon_update_sessions(TrayIcon *tray, sd_bus *bus) {
     if (!tray || !bus) {
         return;
     }
 
-    /* Initialize hash tables on first call */
-    if (!session_menu_items) {
-        session_menu_items = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                                   (GDestroyNotify)free_session_menu_item);
+    /* Store bus reference and build app menu on first call */
+    if (!tray->bus) {
+        tray->bus = bus;
     }
-    if (!config_menu_items) {
-        config_menu_items = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                                  (GDestroyNotify)free_config_menu_item);
+    if (!tray->app_menu_built) {
+        build_app_menu(tray);
     }
-    /* NEW: Initialize unified connection menu items hash table */
-    if (!connection_menu_items) {
-        connection_menu_items = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                                      (GDestroyNotify)free_connection_menu_item);
-    }
-    if (!timer_labels) {
-        timer_labels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    }
-
-    /* Initialize static menu items (one-time) */
-    init_static_menu_items(tray, bus);
-
-    /* === NEW UNIFIED CONNECTION LOGIC === */
 
     /* Get merged connection data */
-    unsigned int connection_count = 0;
-    ConnectionInfo *connections = merge_connections_data(bus, &connection_count);
+    unsigned int count = 0;
+    ConnectionInfo *connections = merge_connections_data(bus, &count);
 
-    /* Track which connections exist now */
-    GHashTable *current_connections = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    /* Track which config_paths exist in current data */
+    GHashTable *current = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    /* Create or update connection indicators */
     if (connections) {
-        for (unsigned int i = 0; i < connection_count; i++) {
-            g_hash_table_insert(current_connections, g_strdup(connections[i].config_path), GINT_TO_POINTER(1));
-        }
-    }
-
-    /* Show/hide CONNECTIONS header */
-    if (connection_count > 0) {
-        if (!connections_header) {
-            connections_header = widget_create_section_header("CONNECTIONS");
-            /* Insert before static section */
-            GList *children = gtk_container_get_children(GTK_CONTAINER(tray->menu));
-            int insert_pos = g_list_index(children, static_section_sep);
-            if (insert_pos >= 0) {
-                gtk_menu_shell_insert(GTK_MENU_SHELL(tray->menu), connections_header, insert_pos);
-            }
-            g_list_free(children);
-        }
-        gtk_widget_show(connections_header);
-
-        /* Hide no connections item */
-        if (no_connections_item) {
-            gtk_widget_hide(no_connections_item);
-        }
-
-        /* Update or create connection menu items */
-        for (unsigned int i = 0; i < connection_count; i++) {
+        for (unsigned int i = 0; i < count; i++) {
             ConnectionInfo *conn = &connections[i];
+            g_hash_table_insert(current, g_strdup(conn->config_path), GINT_TO_POINTER(1));
 
-            ConnectionMenuItem *menu_item = g_hash_table_lookup(connection_menu_items, conn->config_path);
-            if (menu_item) {
-                /* Update existing item */
-                update_connection_menu_item(menu_item, conn, bus);
+            ConnectionIndicator *ci = g_hash_table_lookup(tray->connections,
+                                                           conn->config_path);
+            if (ci) {
+                connection_indicator_update(ci, conn);
             } else {
-                /* Create new item */
-                menu_item = create_connection_menu_item(tray, bus, conn);
-                g_hash_table_insert(connection_menu_items, g_strdup(conn->config_path), menu_item);
-            }
-
-            /* Update timer labels tracking for connected sessions */
-            if (conn->state == CONN_STATE_CONNECTED && conn->session_path) {
-                if (!g_hash_table_contains(timer_labels, conn->session_path)) {
-                    g_hash_table_insert(timer_labels, g_strdup(conn->session_path), menu_item->parent_item);
+                ci = connection_indicator_create(bus, conn);
+                if (ci) {
+                    g_hash_table_insert(tray->connections,
+                                        g_strdup(conn->config_path), ci);
                 }
-            } else if (conn->session_path) {
-                g_hash_table_remove(timer_labels, conn->session_path);
             }
         }
-    } else {
-        /* No connections */
-        if (connections_header) {
-            gtk_widget_hide(connections_header);
-        }
-        if (!no_connections_item) {
-            no_connections_item = gtk_menu_item_new_with_label("No configurations available");
-            gtk_widget_set_sensitive(no_connections_item, FALSE);
-            GList *children = gtk_container_get_children(GTK_CONTAINER(tray->menu));
-            int insert_pos = g_list_index(children, static_section_sep);
-            if (insert_pos >= 0) {
-                gtk_menu_shell_insert(GTK_MENU_SHELL(tray->menu), no_connections_item, insert_pos);
-            }
-            g_list_free(children);
-        }
-        gtk_widget_show(no_connections_item);
     }
 
-    /* Remove connections that no longer exist */
+    /* Remove indicators for deleted configs */
+    GList *to_remove = NULL;
     GHashTableIter iter;
     gpointer key, value;
-    GList *to_remove = NULL;
 
-    g_hash_table_iter_init(&iter, connection_menu_items);
+    g_hash_table_iter_init(&iter, tray->connections);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
-        const char *config_path = (const char *)key;
-        if (!g_hash_table_contains(current_connections, config_path)) {
-            to_remove = g_list_prepend(to_remove, g_strdup(config_path));
+        if (!g_hash_table_contains(current, (const char *)key)) {
+            to_remove = g_list_prepend(to_remove, g_strdup((const char *)key));
         }
     }
 
     for (GList *l = to_remove; l != NULL; l = l->next) {
-        g_hash_table_remove(connection_menu_items, l->data);
+        g_hash_table_remove(tray->connections, l->data);
         g_free(l->data);
     }
     g_list_free(to_remove);
+    g_hash_table_destroy(current);
 
-    g_hash_table_destroy(current_connections);
-
-    /* Update tooltip - count active connections */
-    unsigned int active_count = 0;
+    /* Update app indicator tooltip */
+    unsigned int active = 0;
     if (connections) {
-        for (unsigned int i = 0; i < connection_count; i++) {
+        for (unsigned int i = 0; i < count; i++) {
             if (connections[i].state != CONN_STATE_DISCONNECTED) {
-                active_count++;
+                active++;
             }
         }
     }
 
-    if (active_count > 0) {
-        char tooltip[256];
+    char tooltip[256];
+    if (active > 0) {
         snprintf(tooltip, sizeof(tooltip), "OpenVPN3 Manager - %u active connection%s",
-                active_count, active_count == 1 ? "" : "s");
-        tray_icon_set_tooltip(tray, tooltip);
+                 active, active == 1 ? "" : "s");
     } else {
-        tray_icon_set_tooltip(tray, "OpenVPN3 Manager - No active connections");
+        snprintf(tooltip, sizeof(tooltip), "OpenVPN3 Manager - No active connections");
     }
+    tray_icon_set_tooltip(tray, tooltip);
 
-    /* Clean up auth_launched entries for sessions that no longer exist */
-    if (auth_launched && active_count == 0) {
-        /* No active sessions - clear all auth tracking */
-        g_hash_table_remove_all(auth_launched);
-    } else if (auth_launched && connections) {
-        /* Remove entries for sessions that are no longer active */
-        to_remove = NULL;
+    /* Clean up stale auth tracking entries */
+    if (auth_launched) {
+        if (active == 0) {
+            g_hash_table_remove_all(auth_launched);
+        } else if (connections) {
+            to_remove = NULL;
 
-        g_hash_table_iter_init(&iter, auth_launched);
-        while (g_hash_table_iter_next(&iter, &key, &value)) {
-            const char *tracked_path = (const char *)key;
-            bool found = false;
-            for (unsigned int i = 0; i < connection_count; i++) {
-                if (connections[i].session_path &&
-                    strcmp(connections[i].session_path, tracked_path) == 0) {
-                    found = true;
-                    break;
+            g_hash_table_iter_init(&iter, auth_launched);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                const char *tracked = (const char *)key;
+                gboolean found = FALSE;
+                for (unsigned int i = 0; i < count; i++) {
+                    if (connections[i].session_path &&
+                        strcmp(connections[i].session_path, tracked) == 0) {
+                        found = TRUE;
+                        break;
+                    }
+                }
+                if (!found) {
+                    to_remove = g_list_prepend(to_remove, g_strdup(tracked));
                 }
             }
-            if (!found) {
-                to_remove = g_list_prepend(to_remove, g_strdup(tracked_path));
-            }
-        }
 
-        /* Remove stale entries */
-        for (GList *l = to_remove; l != NULL; l = l->next) {
-            g_hash_table_remove(auth_launched, l->data);
-            g_free(l->data);
+            for (GList *l = to_remove; l != NULL; l = l->next) {
+                g_hash_table_remove(auth_launched, l->data);
+                g_free(l->data);
+            }
+            g_list_free(to_remove);
         }
-        g_list_free(to_remove);
     }
 
-    /* Free merged connection data */
-    free_connection_info_array(connections, connection_count);
-
-    /* === END NEW UNIFIED CONNECTION LOGIC === */
+    free_connection_info_array(connections, count);
 }
 
+/**
+ * Update elapsed time labels for connected sessions.
+ * Rebuilds menus for CONNECTED indicators to refresh the elapsed time.
+ */
+void tray_icon_update_timers(TrayIcon *tray, sd_bus *bus) {
+    (void)bus;
 
+    if (!tray || !tray->connections) {
+        return;
+    }
+
+    GHashTableIter iter;
+    gpointer key, value;
+
+    g_hash_table_iter_init(&iter, tray->connections);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        ConnectionIndicator *ci = (ConnectionIndicator *)value;
+        if (ci->state == CONN_STATE_CONNECTED) {
+            connection_indicator_rebuild_menu(ci);
+        }
+    }
+}
+
+/**
+ * Signal the tray to quit
+ */
 void tray_icon_quit(TrayIcon *tray) {
     if (!tray) {
         return;
     }
-
-    /* Nothing special needed - just stop updating */
 }
 
 /**
- * Clean up tray icon and free resources
+ * Clean up tray icon and free all resources
  */
 void tray_icon_cleanup(TrayIcon *tray) {
     if (!tray) {
         return;
     }
 
-    /* Free tooltip */
-    if (tray->tooltip) {
-        g_free(tray->tooltip);
-        tray->tooltip = NULL;
+    /* Destroy all connection indicators */
+    if (tray->connections) {
+        g_hash_table_destroy(tray->connections);
+        tray->connections = NULL;
     }
 
-    /* Cleanup GTK menu */
+    /* Free tooltip */
+    g_free(tray->tooltip);
+    tray->tooltip = NULL;
+
+    /* Cleanup app menu */
     if (tray->menu) {
         gtk_widget_destroy(tray->menu);
         tray->menu = NULL;
@@ -1734,42 +1173,11 @@ void tray_icon_cleanup(TrayIcon *tray) {
         session_timings = NULL;
     }
 
-    /* Cleanup timer labels */
-    if (timer_labels) {
-        g_hash_table_destroy(timer_labels);
-        timer_labels = NULL;
-    }
-
     /* Cleanup auth launched tracking */
     if (auth_launched) {
         g_hash_table_destroy(auth_launched);
         auth_launched = NULL;
     }
-
-    /* Cleanup session menu items */
-    if (session_menu_items) {
-        g_hash_table_destroy(session_menu_items);
-        session_menu_items = NULL;
-    }
-
-    /* Cleanup config menu items */
-    if (config_menu_items) {
-        g_hash_table_destroy(config_menu_items);
-        config_menu_items = NULL;
-    }
-
-    /* Null out static menu item pointers (they're destroyed with tray->menu) */
-    static_section_sep = NULL;
-    dashboard_item = NULL;
-    import_item = NULL;
-    settings_item = NULL;
-    quit_item = NULL;
-    sessions_separator = NULL;
-    no_sessions_item = NULL;
-    configs_separator = NULL;
-    configs_header = NULL;
-    no_configs_item = NULL;
-    loading_configs_item = NULL;
 
     logger_info("System tray icon cleaned up");
 

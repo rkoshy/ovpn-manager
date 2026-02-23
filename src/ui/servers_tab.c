@@ -49,6 +49,31 @@ static void ping_callback(const char *hostname, int latency_ms, void *user_data)
 static void test_all_servers_latency(ServersTab *tab);
 
 /**
+ * Cell data function for latency column - applies background color based on latency value
+ */
+static void latency_cell_data_func(GtkTreeViewColumn *col, GtkCellRenderer *renderer,
+                                    GtkTreeModel *model, GtkTreeIter *iter, gpointer data) {
+    (void)col; (void)data;
+    gpointer ptr;
+    gtk_tree_model_get(model, iter, COL_SERVER_INFO, &ptr, -1);
+    ServerInfo *server = (ServerInfo *)ptr;
+
+    if (server && server->latency_ms >= 0 && !server->testing) {
+        GdkRGBA bg;
+        if (server->latency_ms < 50) {
+            gdk_rgba_parse(&bg, "rgba(52, 199, 89, 0.12)");
+        } else if (server->latency_ms < 150) {
+            gdk_rgba_parse(&bg, "rgba(255, 149, 0, 0.12)");
+        } else {
+            gdk_rgba_parse(&bg, "rgba(255, 59, 48, 0.12)");
+        }
+        g_object_set(renderer, "cell-background-rgba", &bg, "cell-background-set", TRUE, NULL);
+    } else {
+        g_object_set(renderer, "cell-background-set", FALSE, NULL);
+    }
+}
+
+/**
  * Free server info structure
  */
 static void server_info_free(ServerInfo *info) {
@@ -166,12 +191,13 @@ ServersTab* servers_tab_create(sd_bus *bus) {
     gtk_tree_view_column_set_resizable(column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(tab->tree_view), column);
 
-    /* Latency column */
+    /* Latency column with color coding */
     renderer = gtk_cell_renderer_text_new();
-    column = gtk_tree_view_column_new_with_attributes(
-        "Latency", renderer,
-        "text", COL_LATENCY,
-        NULL);
+    column = gtk_tree_view_column_new();
+    gtk_tree_view_column_set_title(column, "Latency");
+    gtk_tree_view_column_pack_start(column, renderer, TRUE);
+    gtk_tree_view_column_add_attribute(column, renderer, "text", COL_LATENCY);
+    gtk_tree_view_column_set_cell_data_func(column, renderer, latency_cell_data_func, NULL, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_LATENCY);
     gtk_tree_view_append_column(GTK_TREE_VIEW(tab->tree_view), column);
 
