@@ -132,4 +132,14 @@ int session_get_statistics(sd_bus *bus, const char *session_path,
                           uint64_t *bytes_in, uint64_t *bytes_out,
                           uint64_t *packets_in, uint64_t *packets_out);
 
+/**
+ * Force-disconnect all active sessions (cleanup for stuck sessions)
+ *
+ * @param bus D-Bus connection
+ * @param out_total Output: total sessions found
+ * @param out_cleaned Output: sessions successfully disconnected
+ * @return 0 on success, negative on error
+ */
+int session_cleanup_all(sd_bus *bus, unsigned int *out_total, unsigned int *out_cleaned);
+
 #endif /* SESSION_CLIENT_H */

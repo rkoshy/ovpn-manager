@@ -922,3 +922,46 @@ int session_get_statistics(sd_bus *bus, const char *session_path,
 
     return 0;
 }
+
+/**
+ * Force-disconnect all active sessions (cleanup for stuck sessions)
+ */
+int session_cleanup_all(sd_bus *bus, unsigned int *out_total, unsigned int *out_cleaned) {
+    if (!bus || !out_total || !out_cleaned) {
+        return -1;
+    }
+
+    *out_total = 0;
+    *out_cleaned = 0;
+
+    VpnSession **sessions = NULL;
+    unsigned int count = 0;
+
+    int r = session_list(bus, &sessions, &count);
+    if (r < 0 || !sessions || count == 0) {
+        return 0;  /* Nothing to clean up */
+    }
+
+    *out_total = count;
+
+    for (unsigned int i = 0; i < count; i++) {
+        if (!sessions[i] || !sessions[i]->session_path) {
+            continue;
+        }
+
+        logger_info("Cleanup: disconnecting session '%s' (%s)",
+                     sessions[i]->config_name ? sessions[i]->config_name : "unknown",
+                     sessions[i]->session_path);
+
+        r = session_disconnect(bus, sessions[i]->session_path);
+        if (r >= 0) {
+            (*out_cleaned)++;
+        } else {
+            logger_error("Cleanup: failed to disconnect session '%s'",
+                         sessions[i]->config_name ? sessions[i]->config_name : "unknown");
+        }
+    }
+
+    session_list_free(sessions, count);
+    return 0;
+}

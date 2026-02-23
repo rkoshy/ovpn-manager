@@ -844,6 +844,116 @@ static void import_config_callback(GtkMenuItem *item, gpointer user_data) {
     g_free(file_path);
 }
 
+/**
+ * Force cleanup all VPN sessions via D-Bus (no sudo required)
+ */
+static void on_force_cleanup(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    TrayIcon *tray = (TrayIcon *)data;
+    if (!tray || !tray->bus) {
+        return;
+    }
+
+    /* Confirmation dialog */
+    GtkWidget *dialog = gtk_message_dialog_new(
+        NULL,
+        GTK_DIALOG_MODAL,
+        GTK_MESSAGE_WARNING,
+        GTK_BUTTONS_NONE,
+        "Force cleanup all VPN sessions?\n\n"
+        "This will disconnect all active VPN connections."
+    );
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Cleanup", GTK_RESPONSE_ACCEPT);
+
+    int response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+
+    if (response != GTK_RESPONSE_ACCEPT) {
+        return;
+    }
+
+    logger_info("Force cleanup: disconnecting all sessions");
+
+    unsigned int total = 0, cleaned = 0;
+    session_cleanup_all(tray->bus, &total, &cleaned);
+
+    char msg[256];
+    if (total == 0) {
+        snprintf(msg, sizeof(msg), "No active sessions found.");
+    } else if (cleaned == total) {
+        snprintf(msg, sizeof(msg), "Successfully disconnected %u session%s.",
+                 cleaned, cleaned == 1 ? "" : "s");
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "Disconnected %u of %u sessions.\n\n"
+                 "%u session%s could not be disconnected.\n"
+                 "Try \"Restart VPN Service\" if sessions are still stuck.",
+                 cleaned, total,
+                 total - cleaned, (total - cleaned) == 1 ? "" : "s");
+    }
+
+    dialog_show_info("Force Cleanup", msg);
+}
+
+/**
+ * Restart VPN backend service (requires sudo via pkexec)
+ */
+static void on_restart_vpn_service(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    (void)data;
+
+    /* Confirmation dialog */
+    GtkWidget *dialog = gtk_message_dialog_new(
+        NULL,
+        GTK_DIALOG_MODAL,
+        GTK_MESSAGE_WARNING,
+        GTK_BUTTONS_NONE,
+        "Restart VPN Service?\n\n"
+        "This will kill all VPN backend processes and\n"
+        "disconnect all active sessions.\n\n"
+        "Administrative privileges are required."
+    );
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Restart", GTK_RESPONSE_ACCEPT);
+
+    int response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+
+    if (response != GTK_RESPONSE_ACCEPT) {
+        return;
+    }
+
+    logger_info("Restarting VPN backend service via pkexec");
+
+    GError *error = NULL;
+    gboolean ok = g_spawn_command_line_async(
+        "pkexec bash -c '"
+        "killall openvpn3-service-backend 2>/dev/null; "
+        "sleep 1; "
+        "echo VPN backend processes terminated"
+        "'",
+        &error
+    );
+
+    if (!ok) {
+        logger_error("Failed to restart VPN service: %s",
+                     error ? error->message : "Unknown error");
+        char err_msg[512];
+        snprintf(err_msg, sizeof(err_msg),
+                 "Failed to restart VPN service:\n%s",
+                 error ? error->message : "Unknown error");
+        dialog_show_error("Restart Failed", err_msg);
+        if (error) {
+            g_error_free(error);
+        }
+    } else {
+        dialog_show_info("VPN Service",
+                         "VPN backend processes are being restarted.\n\n"
+                         "Reconnect your VPN sessions when ready.");
+    }
+}
+
 /* ──────────────────────────────────────────────────────────────
  * App menu building
  * ────────────────────────────────────────────────────────────── */
@@ -886,6 +996,23 @@ static void build_app_menu(TrayIcon *tray) {
     gtk_widget_set_sensitive(settings, FALSE);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), settings);
     gtk_widget_show(settings);
+
+    /* Separator — Troubleshooting section */
+    GtkWidget *sep_trouble = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), sep_trouble);
+    gtk_widget_show(sep_trouble);
+
+    /* Force Cleanup Sessions */
+    GtkWidget *cleanup = gtk_menu_item_new_with_label("Force Cleanup Sessions");
+    g_signal_connect(cleanup, "activate", G_CALLBACK(on_force_cleanup), tray);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), cleanup);
+    gtk_widget_show(cleanup);
+
+    /* Restart VPN Service... */
+    GtkWidget *restart = gtk_menu_item_new_with_label("Restart VPN Service...");
+    g_signal_connect(restart, "activate", G_CALLBACK(on_restart_vpn_service), tray);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), restart);
+    gtk_widget_show(restart);
 
     /* Separator */
     GtkWidget *sep2 = gtk_separator_menu_item_new();
