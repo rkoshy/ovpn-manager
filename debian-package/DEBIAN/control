@@ -1,0 +1,11 @@
+Package: ovpn-manager
+Version: 0.4.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libglib2.0-0, libgtk-3-0, libsystemd0, libayatana-appindicator3-1, libcairo2
+Maintainer: Renny Koshy <renny@koshy.org>
+Homepage: https://github.com/rennykoshy/ovpn-manager
+Description: Professional GTK3-based VPN client for OpenVPN3
+ Lightweight, event-driven VPN manager with real-time monitoring,
+ server selection, and advanced features for power users.

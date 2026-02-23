@@ -20,6 +20,7 @@
  */
 struct Dashboard {
     GtkWidget *window;
+    GtkWidget *header_bar;
     GtkWidget *notebook;
     GtkWidget *main_box;
     GtkWidget *sessions_container;
@@ -31,6 +32,18 @@ struct Dashboard {
     /* Statistics widgets - card-based view */
     GtkWidget *stats_flowbox;      /* FlowBox container for stat cards */
     GtkWidget *stats_empty_state;  /* Empty state widget (shown when disconnected) */
+    /* Aggregate bandwidth graph */
+    GtkWidget *aggregate_graph;
+    GtkWidget *aggregate_graph_box;
+    GtkWidget *aggregate_dl_label;
+    GtkWidget *aggregate_ul_label;
+    double aggregate_dl_history[120];
+    double aggregate_ul_history[120];
+    int aggregate_write_idx;
+    int aggregate_sample_count;
+    /* Status bar */
+    GtkWidget *status_bar;
+    GtkWidget *status_label;
     /* Bandwidth monitors - one per session (hash table: session_path -> BandwidthMonitor) */
     GHashTable *bandwidth_monitors;
     /* Servers tab instance */
@@ -195,6 +208,26 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
     cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.02);
     cairo_rectangle(cr, 0, 0, width, height);
     cairo_fill(cr);
+
+    /* Horizontal grid lines at 25%, 50%, 75% */
+    {
+        GdkRGBA grid_clr;
+        GtkStyleContext *sc = gtk_widget_get_style_context(widget);
+        if (!gtk_style_context_lookup_color(sc, "text_tertiary", &grid_clr))
+            grid_clr = (GdkRGBA){0.5, 0.5, 0.5, 1.0};
+        grid_clr.alpha = 0.25;
+        cairo_set_source_rgba(cr, grid_clr.red, grid_clr.green, grid_clr.blue, grid_clr.alpha);
+        cairo_set_line_width(cr, 0.5);
+        double dashes[] = {4.0, 4.0};
+        cairo_set_dash(cr, dashes, 2, 0);
+        for (int i = 1; i <= 3; i++) {
+            double gy = margin + (height - 2 * margin) * (1.0 - i * 0.25);
+            cairo_move_to(cr, margin, gy);
+            cairo_line_to(cr, width - margin, gy);
+            cairo_stroke(cr);
+        }
+        cairo_set_dash(cr, NULL, 0, 0);
+    }
 
     if (!monitor) {
         return TRUE;
@@ -393,6 +426,189 @@ static gboolean on_card_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data
     cairo_set_source_rgba(cr, 0.2, 0.5, 0.95, 0.8);
     cairo_stroke(cr);
 
+    /* Overlay current rate text in graph corners */
+    {
+        BandwidthRate overlay_rate;
+        if (bandwidth_monitor_get_rate(monitor, &overlay_rate) >= 0) {
+            char dl_t[32], ul_t[32], dl_f[48], ul_f[48];
+            format_bytes((uint64_t)overlay_rate.download_rate_bps, dl_t, sizeof(dl_t));
+            format_bytes((uint64_t)overlay_rate.upload_rate_bps, ul_t, sizeof(ul_t));
+            snprintf(dl_f, sizeof(dl_f), "↓ %s/s", dl_t);
+            snprintf(ul_f, sizeof(ul_f), "↑ %s/s", ul_t);
+
+            GtkStyleContext *sc = gtk_widget_get_style_context(widget);
+            PangoLayout *layout = pango_cairo_create_layout(cr);
+            PangoFontDescription *font = pango_font_description_from_string("Monospace Bold 8");
+            pango_layout_set_font_description(layout, font);
+
+            /* Download - top left (green) */
+            GdkRGBA dl_clr;
+            if (!gtk_style_context_lookup_color(sc, "success_green", &dl_clr))
+                dl_clr = (GdkRGBA){0.2, 0.8, 0.4, 1.0};
+            dl_clr.alpha = 0.9;
+            cairo_set_source_rgba(cr, dl_clr.red, dl_clr.green, dl_clr.blue, dl_clr.alpha);
+            pango_layout_set_text(layout, dl_f, -1);
+            cairo_move_to(cr, margin + 4, margin + 2);
+            pango_cairo_show_layout(cr, layout);
+
+            /* Upload - top right (blue) */
+            GdkRGBA ul_clr;
+            if (!gtk_style_context_lookup_color(sc, "primary_blue", &ul_clr))
+                ul_clr = (GdkRGBA){0.2, 0.5, 0.95, 1.0};
+            ul_clr.alpha = 0.9;
+            cairo_set_source_rgba(cr, ul_clr.red, ul_clr.green, ul_clr.blue, ul_clr.alpha);
+            pango_layout_set_text(layout, ul_f, -1);
+            PangoRectangle ink, logical;
+            pango_layout_get_pixel_extents(layout, &ink, &logical);
+            cairo_move_to(cr, width - margin - 4 - logical.width, margin + 2);
+            pango_cairo_show_layout(cr, layout);
+
+            pango_font_description_free(font);
+            g_object_unref(layout);
+        }
+    }
+
+    return TRUE;
+}
+
+/**
+ * Draw aggregate bandwidth graph for all sessions combined
+ */
+static gboolean on_aggregate_graph_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
+    Dashboard *dashboard = (Dashboard *)data;
+    int width = gtk_widget_get_allocated_width(widget);
+    int height = gtk_widget_get_allocated_height(widget);
+    const int margin = 8;
+
+    /* Background */
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.02);
+    cairo_rectangle(cr, 0, 0, width, height);
+    cairo_fill(cr);
+
+    /* Grid lines */
+    {
+        GdkRGBA grid_clr;
+        GtkStyleContext *sc = gtk_widget_get_style_context(widget);
+        if (!gtk_style_context_lookup_color(sc, "text_tertiary", &grid_clr))
+            grid_clr = (GdkRGBA){0.5, 0.5, 0.5, 1.0};
+        grid_clr.alpha = 0.2;
+        cairo_set_source_rgba(cr, grid_clr.red, grid_clr.green, grid_clr.blue, grid_clr.alpha);
+        cairo_set_line_width(cr, 0.5);
+        double dashes[] = {4.0, 4.0};
+        cairo_set_dash(cr, dashes, 2, 0);
+        for (int i = 1; i <= 3; i++) {
+            double gy = margin + (height - 2 * margin) * (1.0 - i * 0.25);
+            cairo_move_to(cr, margin, gy);
+            cairo_line_to(cr, width - margin, gy);
+            cairo_stroke(cr);
+        }
+        cairo_set_dash(cr, NULL, 0, 0);
+    }
+
+    int count = dashboard->aggregate_sample_count;
+    if (count < 2) return TRUE;
+
+    /* Find max rate for scaling */
+    double max_rate = 1024.0;
+    for (int i = 0; i < count; i++) {
+        int idx = (dashboard->aggregate_write_idx - 1 - i + 120) % 120;
+        if (dashboard->aggregate_dl_history[idx] > max_rate)
+            max_rate = dashboard->aggregate_dl_history[idx];
+        if (dashboard->aggregate_ul_history[idx] > max_rate)
+            max_rate = dashboard->aggregate_ul_history[idx];
+    }
+
+    int gw = width - 2 * margin;
+    int gh = height - 2 * margin;
+
+    /* Draw download line (green) with gradient fill */
+    cairo_set_line_width(cr, 2.0);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+
+    gboolean first_point = TRUE;
+    for (int i = 0; i < count; i++) {
+        int idx = (dashboard->aggregate_write_idx - 1 - i + 120) % 120;
+        double rate = dashboard->aggregate_dl_history[idx];
+        double x = margin + gw - (i * gw / 120.0);
+        double y = margin + gh - (rate / max_rate * gh);
+        if (x < margin) break;
+
+        if (first_point) {
+            cairo_move_to(cr, x, y);
+            first_point = FALSE;
+        } else {
+            cairo_line_to(cr, x, y);
+        }
+    }
+
+    if (!first_point) {
+        /* Save path for stroke, then fill */
+        cairo_path_t *dl_path = cairo_copy_path(cr);
+
+        /* Complete fill area */
+        double cur_x, cur_y;
+        cairo_get_current_point(cr, &cur_x, &cur_y);
+        cairo_line_to(cr, cur_x, margin + gh);
+        cairo_line_to(cr, margin + gw, margin + gh);
+        cairo_close_path(cr);
+
+        cairo_pattern_t *dl_grad = cairo_pattern_create_linear(0, margin, 0, margin + gh);
+        cairo_pattern_add_color_stop_rgba(dl_grad, 0.0, 0.2, 0.8, 0.4, 0.3);
+        cairo_pattern_add_color_stop_rgba(dl_grad, 1.0, 0.2, 0.8, 0.4, 0.0);
+        cairo_set_source(cr, dl_grad);
+        cairo_fill(cr);
+        cairo_pattern_destroy(dl_grad);
+
+        /* Stroke the line */
+        cairo_new_path(cr);
+        cairo_append_path(cr, dl_path);
+        cairo_set_source_rgba(cr, 0.2, 0.8, 0.4, 0.8);
+        cairo_stroke(cr);
+        cairo_path_destroy(dl_path);
+    }
+
+    /* Draw upload line (blue) with gradient fill */
+    cairo_set_line_width(cr, 2.0);
+    first_point = TRUE;
+    for (int i = 0; i < count; i++) {
+        int idx = (dashboard->aggregate_write_idx - 1 - i + 120) % 120;
+        double rate = dashboard->aggregate_ul_history[idx];
+        double x = margin + gw - (i * gw / 120.0);
+        double y = margin + gh - (rate / max_rate * gh);
+        if (x < margin) break;
+
+        if (first_point) {
+            cairo_move_to(cr, x, y);
+            first_point = FALSE;
+        } else {
+            cairo_line_to(cr, x, y);
+        }
+    }
+
+    if (!first_point) {
+        cairo_path_t *ul_path = cairo_copy_path(cr);
+
+        double cur_x, cur_y;
+        cairo_get_current_point(cr, &cur_x, &cur_y);
+        cairo_line_to(cr, cur_x, margin + gh);
+        cairo_line_to(cr, margin + gw, margin + gh);
+        cairo_close_path(cr);
+
+        cairo_pattern_t *ul_grad = cairo_pattern_create_linear(0, margin, 0, margin + gh);
+        cairo_pattern_add_color_stop_rgba(ul_grad, 0.0, 0.2, 0.5, 0.95, 0.3);
+        cairo_pattern_add_color_stop_rgba(ul_grad, 1.0, 0.2, 0.5, 0.95, 0.0);
+        cairo_set_source(cr, ul_grad);
+        cairo_fill(cr);
+        cairo_pattern_destroy(ul_grad);
+
+        cairo_new_path(cr);
+        cairo_append_path(cr, ul_path);
+        cairo_set_source_rgba(cr, 0.2, 0.5, 0.95, 0.8);
+        cairo_stroke(cr);
+        cairo_path_destroy(ul_path);
+    }
+
     return TRUE;
 }
 
@@ -445,6 +661,31 @@ static GtkWidget* create_vpn_stat_card(Dashboard *dashboard, VpnSession *session
     gtk_label_set_xalign(GTK_LABEL(name_label), 0.0);
     gtk_box_pack_start(GTK_BOX(header), name_label, TRUE, TRUE, 0);
 
+    /* Quality badge based on error ratio */
+    {
+        BandwidthSample q_sample;
+        if (bandwidth_monitor_get_latest_sample(monitor, &q_sample) >= 0) {
+            uint64_t total_pkts = q_sample.packets_in + q_sample.packets_out;
+            uint64_t total_errs = q_sample.errors_in + q_sample.errors_out +
+                                  q_sample.dropped_in + q_sample.dropped_out;
+            const char *q_text = NULL, *q_class = NULL;
+            if (total_pkts > 100) {
+                double ratio = (double)total_errs / (double)total_pkts;
+                if (ratio < 0.001)      { q_text = "Excellent"; q_class = "quality-excellent"; }
+                else if (ratio < 0.01)  { q_text = "Good";      q_class = "quality-good"; }
+                else if (ratio < 0.05)  { q_text = "Fair";      q_class = "quality-fair"; }
+                else                    { q_text = "Poor";      q_class = "quality-poor"; }
+            }
+            if (q_text) {
+                GtkWidget *badge = gtk_label_new(q_text);
+                GtkStyleContext *qc = gtk_widget_get_style_context(badge);
+                gtk_style_context_add_class(qc, "quality-badge");
+                gtk_style_context_add_class(qc, q_class);
+                gtk_box_pack_end(GTK_BOX(header), badge, FALSE, FALSE, 0);
+            }
+        }
+    }
+
     gtk_box_pack_start(GTK_BOX(card), header, FALSE, FALSE, 0);
 
     /* Separator */
@@ -457,12 +698,12 @@ static GtkWidget* create_vpn_stat_card(Dashboard *dashboard, VpnSession *session
 
     /* Download speed */
     GtkWidget *download_label = gtk_label_new("↓ 0 B/s");
-    gtk_style_context_add_class(gtk_widget_get_style_context(download_label), "card-bandwidth");
+    gtk_style_context_add_class(gtk_widget_get_style_context(download_label), "card-bandwidth-download");
     gtk_box_pack_start(GTK_BOX(throughput_box), download_label, FALSE, FALSE, 0);
 
     /* Upload speed */
     GtkWidget *upload_label = gtk_label_new("↑ 0 B/s");
-    gtk_style_context_add_class(gtk_widget_get_style_context(upload_label), "card-bandwidth");
+    gtk_style_context_add_class(gtk_widget_get_style_context(upload_label), "card-bandwidth-upload");
     gtk_box_pack_start(GTK_BOX(throughput_box), upload_label, FALSE, FALSE, 0);
 
     /* Store labels as widget data for updates */
@@ -473,7 +714,7 @@ static GtkWidget* create_vpn_stat_card(Dashboard *dashboard, VpnSession *session
 
     /* Sparkline graph */
     GtkWidget *graph = gtk_drawing_area_new();
-    gtk_widget_set_size_request(graph, -1, 80);
+    gtk_widget_set_size_request(graph, -1, 140);
     gtk_style_context_add_class(gtk_widget_get_style_context(graph), "card-graph-area");
     g_signal_connect(graph, "draw", G_CALLBACK(on_card_graph_draw), monitor);
     g_object_set_data(G_OBJECT(card), "graph-area", graph);
@@ -485,18 +726,18 @@ static GtkWidget* create_vpn_stat_card(Dashboard *dashboard, VpnSession *session
     /* Detail grid: 2 columns */
     GtkWidget *detail_grid = gtk_grid_new();
     gtk_grid_set_column_spacing(GTK_GRID(detail_grid), 40);
-    gtk_grid_set_row_spacing(GTK_GRID(detail_grid), 4);
+    gtk_grid_set_row_spacing(GTK_GRID(detail_grid), 8);
     gtk_container_set_border_width(GTK_CONTAINER(detail_grid), 10);
 
     /* Left column header */
     GtkWidget *packets_header = gtk_label_new("PACKETS");
-    gtk_style_context_add_class(gtk_widget_get_style_context(packets_header), "card-stats-label");
+    gtk_style_context_add_class(gtk_widget_get_style_context(packets_header), "card-section-header");
     gtk_label_set_xalign(GTK_LABEL(packets_header), 0.0);
     gtk_grid_attach(GTK_GRID(detail_grid), packets_header, 0, 0, 1, 1);
 
     /* Right column header */
     GtkWidget *connection_header = gtk_label_new("CONNECTION");
-    gtk_style_context_add_class(gtk_widget_get_style_context(connection_header), "card-stats-label");
+    gtk_style_context_add_class(gtk_widget_get_style_context(connection_header), "card-section-header");
     gtk_label_set_xalign(GTK_LABEL(connection_header), 0.0);
     gtk_grid_attach(GTK_GRID(detail_grid), connection_header, 1, 0, 1, 1);
 
@@ -703,6 +944,19 @@ static GtkWidget* create_vpn_stat_card(Dashboard *dashboard, VpnSession *session
     gtk_box_pack_start(GTK_BOX(header), info_btn, FALSE, FALSE, 0);
 
     return card;
+}
+
+/**
+ * Create a tab label with icon and text
+ */
+static GtkWidget* create_tab_label(const char *icon_name, const char *text) {
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *icon = gtk_image_new_from_icon_name(icon_name, GTK_ICON_SIZE_MENU);
+    GtkWidget *label = gtk_label_new(text);
+    gtk_box_pack_start(GTK_BOX(box), icon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+    gtk_widget_show_all(box);
+    return box;
 }
 
 /**
@@ -1077,10 +1331,22 @@ Dashboard* dashboard_create(void) {
 
     /* Create window */
     dashboard->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(dashboard->window), "OpenVPN Manager");
     gtk_window_set_default_size(GTK_WINDOW(dashboard->window), 780, 600);
     gtk_window_set_position(GTK_WINDOW(dashboard->window), GTK_WIN_POS_CENTER);
     gtk_container_set_border_width(GTK_CONTAINER(dashboard->window), 0);
+
+    /* Header bar (CSD) */
+    dashboard->header_bar = gtk_header_bar_new();
+    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(dashboard->header_bar), TRUE);
+    gtk_header_bar_set_title(GTK_HEADER_BAR(dashboard->header_bar), "OpenVPN Manager");
+    gtk_header_bar_set_subtitle(GTK_HEADER_BAR(dashboard->header_bar), "No active connections");
+
+    GtkWidget *settings_btn = gtk_button_new_from_icon_name("preferences-system-symbolic", GTK_ICON_SIZE_BUTTON);
+    gtk_widget_set_tooltip_text(settings_btn, "Settings");
+    gtk_widget_set_sensitive(settings_btn, FALSE);
+    gtk_header_bar_pack_end(GTK_HEADER_BAR(dashboard->header_bar), settings_btn);
+
+    gtk_window_set_titlebar(GTK_WINDOW(dashboard->window), dashboard->header_bar);
 
     /* Apply window styling */
     GtkStyleContext *window_context = gtk_widget_get_style_context(dashboard->window);
@@ -1155,7 +1421,7 @@ Dashboard* dashboard_create(void) {
 
     gtk_container_add(GTK_CONTAINER(connections_scrolled), dashboard->connections_tab);
     gtk_notebook_append_page(GTK_NOTEBOOK(dashboard->notebook), connections_scrolled,
-                            gtk_label_new("Connections"));
+                            create_tab_label("network-wired-symbolic", "Connections"));
 
     /* Tab 2: Statistics - Card-based view */
     GtkWidget *stats_scrolled = gtk_scrolled_window_new(NULL, NULL);
@@ -1165,6 +1431,38 @@ Dashboard* dashboard_create(void) {
 
     /* Main container for statistics tab */
     dashboard->statistics_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+    /* Aggregate bandwidth section (fixed above scrolling cards) */
+    dashboard->aggregate_graph_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_start(dashboard->aggregate_graph_box, 20);
+    gtk_widget_set_margin_end(dashboard->aggregate_graph_box, 20);
+    gtk_widget_set_margin_top(dashboard->aggregate_graph_box, 16);
+    gtk_widget_set_no_show_all(dashboard->aggregate_graph_box, TRUE);
+
+    GtkWidget *agg_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *agg_title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(agg_title),
+        "<span size='large' weight='600'>Total Bandwidth</span>");
+    gtk_label_set_xalign(GTK_LABEL(agg_title), 0.0);
+    gtk_box_pack_start(GTK_BOX(agg_header), agg_title, TRUE, TRUE, 0);
+
+    dashboard->aggregate_dl_label = gtk_label_new("↓ 0 B/s");
+    gtk_style_context_add_class(gtk_widget_get_style_context(dashboard->aggregate_dl_label), "card-bandwidth-download");
+    gtk_box_pack_start(GTK_BOX(agg_header), dashboard->aggregate_dl_label, FALSE, FALSE, 0);
+
+    dashboard->aggregate_ul_label = gtk_label_new("↑ 0 B/s");
+    gtk_style_context_add_class(gtk_widget_get_style_context(dashboard->aggregate_ul_label), "card-bandwidth-upload");
+    gtk_box_pack_start(GTK_BOX(agg_header), dashboard->aggregate_ul_label, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(dashboard->aggregate_graph_box), agg_header, FALSE, FALSE, 0);
+
+    dashboard->aggregate_graph = gtk_drawing_area_new();
+    gtk_widget_set_size_request(dashboard->aggregate_graph, -1, 180);
+    gtk_style_context_add_class(gtk_widget_get_style_context(dashboard->aggregate_graph), "card-graph-area");
+    g_signal_connect(dashboard->aggregate_graph, "draw", G_CALLBACK(on_aggregate_graph_draw), dashboard);
+    gtk_box_pack_start(GTK_BOX(dashboard->aggregate_graph_box), dashboard->aggregate_graph, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(dashboard->statistics_tab), dashboard->aggregate_graph_box, FALSE, FALSE, 0);
 
     /* FlowBox for stat cards - wraps automatically */
     dashboard->stats_flowbox = gtk_flow_box_new();
@@ -1203,13 +1501,13 @@ Dashboard* dashboard_create(void) {
     gtk_widget_set_no_show_all(dashboard->stats_empty_state, TRUE);
 
     gtk_notebook_append_page(GTK_NOTEBOOK(dashboard->notebook), dashboard->statistics_tab,
-                            gtk_label_new("Statistics"));
+                            create_tab_label("utilities-system-monitor-symbolic", "Statistics"));
 
     /* Tab 3: Servers */
     dashboard->servers_tab_instance = servers_tab_create(NULL);  /* bus will be set later */
     dashboard->servers_tab = servers_tab_get_widget(dashboard->servers_tab_instance);
     gtk_notebook_append_page(GTK_NOTEBOOK(dashboard->notebook), dashboard->servers_tab,
-                            gtk_label_new("Servers"));
+                            create_tab_label("network-server-symbolic", "Servers"));
 
     /* Initialize bandwidth monitors hash table */
     dashboard->bandwidth_monitors = g_hash_table_new_full(
@@ -1219,8 +1517,20 @@ Dashboard* dashboard_create(void) {
         (GDestroyNotify)bandwidth_monitor_free
     );
 
-    /* Add notebook to window */
-    gtk_container_add(GTK_CONTAINER(dashboard->window), dashboard->notebook);
+    /* Main container: notebook + status bar */
+    GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), dashboard->notebook, TRUE, TRUE, 0);
+
+    /* Status bar */
+    dashboard->status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(dashboard->status_bar), "status-bar");
+    dashboard->status_label = gtk_label_new("No active connections");
+    gtk_label_set_xalign(GTK_LABEL(dashboard->status_label), 0.0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(dashboard->status_label), "status-bar");
+    gtk_box_pack_start(GTK_BOX(dashboard->status_bar), dashboard->status_label, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), dashboard->status_bar, FALSE, FALSE, 0);
+
+    gtk_container_add(GTK_CONTAINER(dashboard->window), main_vbox);
 
     logger_info("Dashboard window created");
 
@@ -1455,9 +1765,91 @@ void dashboard_update(Dashboard *dashboard, sd_bus *bus) {
         }
 
         gtk_widget_show_all(dashboard->stats_flowbox);
+
+        /* Show aggregate graph */
+        if (dashboard->aggregate_graph_box) {
+            gtk_widget_show_all(dashboard->aggregate_graph_box);
+        }
     } else {
         /* No active sessions - show empty state */
         gtk_widget_show(dashboard->stats_empty_state);
+
+        /* Hide aggregate graph */
+        if (dashboard->aggregate_graph_box) {
+            gtk_widget_hide(dashboard->aggregate_graph_box);
+        }
+    }
+
+    /* Update header bar subtitle */
+    if (dashboard->header_bar) {
+        char subtitle[128];
+        if (session_count > 0)
+            snprintf(subtitle, sizeof(subtitle), "%u active connection%s",
+                     session_count, session_count > 1 ? "s" : "");
+        else
+            snprintf(subtitle, sizeof(subtitle), "No active connections");
+        gtk_header_bar_set_subtitle(GTK_HEADER_BAR(dashboard->header_bar), subtitle);
+    }
+
+    /* Aggregate bandwidth data for status bar and aggregate graph */
+    {
+        double total_dl = 0, total_ul = 0;
+        time_t longest_uptime = 0;
+        GHashTableIter bw_iter;
+        gpointer bw_key, bw_value;
+        g_hash_table_iter_init(&bw_iter, dashboard->bandwidth_monitors);
+        while (g_hash_table_iter_next(&bw_iter, &bw_key, &bw_value)) {
+            BandwidthMonitor *mon = (BandwidthMonitor *)bw_value;
+            BandwidthRate bw_rate;
+            if (bandwidth_monitor_get_rate(mon, &bw_rate) >= 0) {
+                total_dl += bw_rate.download_rate_bps;
+                total_ul += bw_rate.upload_rate_bps;
+            }
+            time_t start = bandwidth_monitor_get_start_time(mon);
+            if (start > 0) {
+                time_t uptime = time(NULL) - start;
+                if (uptime > longest_uptime) longest_uptime = uptime;
+            }
+        }
+
+        /* Store in aggregate history buffer */
+        dashboard->aggregate_dl_history[dashboard->aggregate_write_idx] = total_dl;
+        dashboard->aggregate_ul_history[dashboard->aggregate_write_idx] = total_ul;
+        dashboard->aggregate_write_idx = (dashboard->aggregate_write_idx + 1) % 120;
+        if (dashboard->aggregate_sample_count < 120) dashboard->aggregate_sample_count++;
+
+        /* Update aggregate graph labels */
+        if (dashboard->aggregate_dl_label && dashboard->aggregate_ul_label) {
+            char agg_text[64], agg_label[80];
+            format_bytes((uint64_t)total_dl, agg_text, sizeof(agg_text));
+            snprintf(agg_label, sizeof(agg_label), "↓ %s/s", agg_text);
+            gtk_label_set_text(GTK_LABEL(dashboard->aggregate_dl_label), agg_label);
+
+            format_bytes((uint64_t)total_ul, agg_text, sizeof(agg_text));
+            snprintf(agg_label, sizeof(agg_label), "↑ %s/s", agg_text);
+            gtk_label_set_text(GTK_LABEL(dashboard->aggregate_ul_label), agg_label);
+        }
+
+        /* Queue aggregate graph redraw */
+        if (dashboard->aggregate_graph) {
+            gtk_widget_queue_draw(dashboard->aggregate_graph);
+        }
+
+        /* Update status bar */
+        if (dashboard->status_label) {
+            if (session_count > 0) {
+                char dl_s[32], ul_s[32], ut_s[32], status_text[256];
+                format_bytes((uint64_t)total_dl, dl_s, sizeof(dl_s));
+                format_bytes((uint64_t)total_ul, ul_s, sizeof(ul_s));
+                format_elapsed_time(longest_uptime, ut_s, sizeof(ut_s));
+                snprintf(status_text, sizeof(status_text),
+                        "↓ %s/s  ↑ %s/s  ·  %u connection%s  ·  Uptime: %s",
+                        dl_s, ul_s, session_count, session_count > 1 ? "s" : "", ut_s);
+                gtk_label_set_text(GTK_LABEL(dashboard->status_label), status_text);
+            } else {
+                gtk_label_set_text(GTK_LABEL(dashboard->status_label), "No active connections");
+            }
+        }
     }
 
     /* Free sessions after we're done using them */

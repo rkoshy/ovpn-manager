@@ -265,12 +265,17 @@ static void on_app_activate(GApplication *application, gpointer user_data) {
 
     /* Initialize logger system (must be early) */
     LogLevel log_level = parse_log_level(log_level_str);
-    logger_init(false, NULL, log_level, true);
+    /* Enable file logging for debugging (logs to ~/.local/share/ovpn-manager/app.log) */
+    logger_init(true, NULL, log_level, true);
     logger_set_verbosity(verbosity);
 
+    logger_info("=== OpenVPN3 Manager Starting ===");
+    logger_info("Log level: %d, Verbosity: %d", log_level, verbosity);
+
     /* Print banner to terminal (keep as printf for direct user output) */
-    printf("OpenVPN3 Manager v0.1.0\n");
-    printf("========================\n\n");
+    printf("OpenVPN3 Manager v0.4.0\n");
+    printf("========================\n");
+    printf("Logs: ~/.local/share/ovpn-manager/app.log\n\n");
 
     /* Initialize theme system */
     logger_info("Initializing theme system...");
